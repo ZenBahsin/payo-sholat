@@ -70,6 +70,7 @@ fun HomeScreen(
     val prayerTimes by viewModel.prayerTimes.collectAsState()
     val bookmark by viewModel.bookmarkState.collectAsState()
     val dailyHadith by viewModel.dailyHadith.collectAsState()
+    val useAutoGps by viewModel.useAutoGps.collectAsState()
 
     var showMenuLainnyaDialog by remember { mutableStateOf(false) }
     var showWidgetDialog by remember { mutableStateOf(false) }
@@ -87,11 +88,16 @@ fun HomeScreen(
         // No toast to prevent annoying the user
     }
 
-    // Run once on initial screen launch to request permissions safely without overwriting manual selection
-    LaunchedEffect(Unit) {
+    // React immediately when user grants location permission so widget & app sync real-time via FusedLocationProviderClient
+    LaunchedEffect(locationPermissionState.status.isGranted) {
         if (locationPermissionState.status.isGranted) {
             viewModel.requestDeviceLocation(forceUserRequest = false)
-        } else {
+        }
+    }
+
+    // Run once on initial screen launch to request permissions safely without overwriting manual selection
+    LaunchedEffect(Unit) {
+        if (!locationPermissionState.status.isGranted) {
             locationPermissionState.launchPermissionRequest()
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -740,7 +746,30 @@ fun HomeScreen(
                     nextPrayerTime = nextPrayerTime,
                     currentPrayerName = currentPrayerName,
                     countdownText = countdownText,
-                    authorityShort = currentLocation.country.authorityShort
+                    authorityShort = currentLocation.country.authorityShort,
+                    useAutoGps = useAutoGps,
+                    onToggleAutoGps = { enabled ->
+                        if (enabled) {
+                            if (locationPermissionState.status.isGranted) {
+                                viewModel.setAutoGpsEnabled(true)
+                                Toast.makeText(context, "Lokasi otomatis GPS widget diaktifkan", Toast.LENGTH_SHORT).show()
+                            } else {
+                                viewModel.setAutoGpsEnabled(true)
+                                locationPermissionState.launchPermissionRequest()
+                            }
+                        } else {
+                            viewModel.setAutoGpsEnabled(false)
+                            Toast.makeText(context, "Widget menggunakan lokasi pilihan manual", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onRefreshWidget = {
+                        if (useAutoGps && locationPermissionState.status.isGranted) {
+                            viewModel.requestDeviceLocation(forceUserRequest = true)
+                        } else {
+                            viewModel.retryFetchPrayerTimes()
+                            com.example.receiver.PrayerWidgetProvider.updateAllWidgets(context)
+                        }
+                    }
                 )
             },
             confirmButton = {

@@ -17,18 +17,34 @@ import com.example.data.LocationPreset
 import com.example.data.PrayerCountry
 import com.example.data.PrayerLocationCatalog
 import com.example.data.api.AladhanApiClient
+import com.example.data.api.MalaysiaPrayerApi
 import com.example.utils.HijriDateHelper
 import com.example.utils.PrayerAlarmScheduler
 import com.example.utils.PrayerTimesCalculator
+import com.example.utils.WidgetLocationSyncHelper
+import com.google.android.gms.location.LocationResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
 
 class PrayerWidgetProvider : AppWidgetProvider() {
+
+    override fun onEnabled(context: Context) {
+        super.onEnabled(context)
+        // Start battery-friendly real-time FusedLocationProviderClient updates as soon as a widget is placed
+        WidgetLocationSyncHelper.registerWidgetLocationUpdates(context.applicationContext)
+    }
+
+    override fun onDisabled(context: Context) {
+        super.onDisabled(context)
+        // Stop location updates when the last widget instance is removed from Home Screen
+        WidgetLocationSyncHelper.unregisterWidgetLocationUpdates(context.applicationContext)
+    }
 
     override fun onUpdate(
         context: Context,
@@ -38,18 +54,140 @@ class PrayerWidgetProvider : AppWidgetProvider() {
         for (appWidgetId in appWidgetIds) {
             updateAppWidget(context, appWidgetManager, appWidgetId)
         }
+
+        // Ensure real-time FusedLocationProviderClient listener is registered & perform throttled GPS sync
+        val appContext = context.applicationContext
+        WidgetLocationSyncHelper.registerWidgetLocationUpdates(appContext)
+        if (WidgetLocationSyncHelper.isAutoGpsEnabled(appContext) &&
+            WidgetLocationSyncHelper.hasLocationPermission(appContext)
+        ) {
+            val pendingResult = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val result = WidgetLocationSyncHelper.syncWidgetLocationIfEligible(
+                        context = appContext,
+                        forceFreshFix = false
+                    )
+                    if (result != null && (result.locationChanged || result.scheduleSynced)) {
+                        updateAllWidgets(appContext)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                } finally {
+                    pendingResult.finish()
+                }
+            }
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
+        val appContext = context.applicationContext
+
         when (intent.action) {
-            ACTION_REFRESH_WIDGET,
+            ACTION_WIDGET_LOCATION_UPDATE -> {
+                // Real-time location update delivered directly from FusedLocationProviderClient
+                if (!WidgetLocationSyncHelper.isAutoGpsEnabled(appContext)) return
+                val locationResult = LocationResult.extractResult(intent)
+                val newLocation = locationResult?.lastLocation ?: return
+                val pendingResult = goAsync()
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        WidgetLocationSyncHelper.applyDetectedLocationAndSyncSchedule(
+                            context = appContext,
+                            location = newLocation,
+                            forceApiRefresh = false
+                        )
+                        updateAllWidgets(appContext)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    } finally {
+                        pendingResult.finish()
+                    }
+                }
+            }
+
+            ACTION_REFRESH_WIDGET -> {
+                val fromUserTap = intent.getBooleanExtra("from_user_tap", false)
+                // Render immediately with current cached state first
+                updateAllWidgets(appContext)
+
+                val shouldSyncGps = WidgetLocationSyncHelper.isAutoGpsEnabled(appContext) &&
+                    WidgetLocationSyncHelper.hasLocationPermission(appContext)
+
+                if (fromUserTap || shouldSyncGps) {
+                    val pendingResult = goAsync()
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            WidgetLocationSyncHelper.registerWidgetLocationUpdates(appContext)
+                            val gpsResult = if (shouldSyncGps) {
+                                WidgetLocationSyncHelper.syncWidgetLocationIfEligible(
+                                    context = appContext,
+                                    forceFreshFix = fromUserTap
+                                )
+                            } else {
+                                null
+                            }
+
+                            // Also guarantee today's official API schedule is cached when user taps refresh
+                            if (fromUserTap && gpsResult == null) {
+                                val location = PrayerLocationCatalog.getSavedLocationPreset(appContext)
+                                val tz = PrayerLocationCatalog.resolveTimeZone(appContext)
+                                val cal = Calendar.getInstance(tz)
+                                PrayerAlarmScheduler.getPrayerTimesFromApiOrCache(
+                                    context = appContext,
+                                    location = location,
+                                    year = cal.get(Calendar.YEAR),
+                                    month = cal.get(Calendar.MONTH) + 1,
+                                    day = cal.get(Calendar.DAY_OF_MONTH)
+                                )
+                            }
+
+                            updateAllWidgets(appContext)
+
+                            if (fromUserTap) {
+                                val toastText = if (gpsResult != null) {
+                                    "Lokasi & jadwal diperbarui: ${gpsResult.locationPreset.widgetDisplayName()}"
+                                } else {
+                                    "Jadwal Sholat Widget diperbarui"
+                                }
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(appContext, toastText, Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        } finally {
+                            pendingResult.finish()
+                        }
+                    }
+                }
+            }
+
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_DATE_CHANGED -> {
-                updateAllWidgets(context)
-                if (intent.action == ACTION_REFRESH_WIDGET && intent.getBooleanExtra("from_user_tap", false)) {
-                    Toast.makeText(context, "Jadwal Sholat Widget diperbarui", Toast.LENGTH_SHORT).show()
+                updateAllWidgets(appContext)
+                if (WidgetLocationSyncHelper.isAutoGpsEnabled(appContext) &&
+                    WidgetLocationSyncHelper.hasLocationPermission(appContext)
+                ) {
+                    val pendingResult = goAsync()
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            WidgetLocationSyncHelper.registerWidgetLocationUpdates(appContext)
+                            val res = WidgetLocationSyncHelper.syncWidgetLocationIfEligible(
+                                context = appContext,
+                                forceFreshFix = intent.action == Intent.ACTION_TIMEZONE_CHANGED
+                            )
+                            if (res != null) {
+                                updateAllWidgets(appContext)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        } finally {
+                            pendingResult.finish()
+                        }
+                    }
                 }
             }
         }
@@ -76,6 +214,7 @@ class PrayerWidgetProvider : AppWidgetProvider() {
 
     companion object {
         const val ACTION_REFRESH_WIDGET = "com.example.ACTION_REFRESH_PRAYER_WIDGET"
+        const val ACTION_WIDGET_LOCATION_UPDATE = "com.example.ACTION_WIDGET_LOCATION_UPDATE"
         const val PREF_WIDGET_THEME = "widget_theme"
 
         fun getSavedTheme(context: Context): WidgetTheme {
@@ -164,8 +303,22 @@ class PrayerWidgetProvider : AppWidgetProvider() {
                 day = day
             )
 
-            // 2. Get synchronized Hijri date
-            val hijriStr = HijriDateHelper.getHijriDate(context, cal)
+            // 2. Get synchronized Hijri date (prefer official JAKIM Hijri date when in Malaysia)
+            val jakimHijri = if (location.country == PrayerCountry.MALAYSIA) {
+                MalaysiaPrayerApi.getCachedDailyPrayerTimesSync(
+                    context = context,
+                    jakimZone = location.jakimZone ?: "WLY01",
+                    year = year,
+                    month = month,
+                    day = day
+                )?.hijriDateFormatted
+            } else {
+                null
+            }
+            if (!jakimHijri.isNullOrBlank() && !HijriDateHelper.hasCachedHijriDate(context, cal)) {
+                HijriDateHelper.saveCachedHijriDate(context, cal, jakimHijri)
+            }
+            val hijriStr = jakimHijri ?: HijriDateHelper.getHijriDate(context, cal)
 
             // 3. Build crystal-clear Location Label (always visible on dedicated top line)
             val locationDisplay = location.widgetDisplayName()
@@ -376,21 +529,38 @@ class PrayerWidgetProvider : AppWidgetProvider() {
                         }
                     }
 
-                    if (!HijriDateHelper.hasCachedHijriDate(appContext, cal) && location.country == PrayerCountry.INDONESIA) {
-                        val sdf = SimpleDateFormat("dd-MM-yyyy", Locale.US).apply {
-                            this.timeZone = timeZone
+                    if (!HijriDateHelper.hasCachedHijriDate(appContext, cal)) {
+                        val jakimHijri = if (location.country == PrayerCountry.MALAYSIA) {
+                            MalaysiaPrayerApi.getCachedDailyPrayerTimesSync(
+                                context = appContext,
+                                jakimZone = location.jakimZone ?: "WLY01",
+                                year = year,
+                                month = month,
+                                day = day
+                            )?.hijriDateFormatted
+                        } else {
+                            null
                         }
-                        val dateStr = sdf.format(cal.time)
-                        val response = AladhanApiClient.service.getHijriDate(dateStr)
-                        if (response.code == 200 && response.data?.hijri != null) {
-                            val hijri = response.data.hijri
-                            val hDay = hijri.day
-                            val enMonth = hijri.month?.en ?: ""
-                            val indonesianMonth = HijriDateHelper.translateHijriMonthToIndonesian(enMonth)
-                            val hYear = hijri.year
-                            val hijriStr = "$hDay $indonesianMonth $hYear H"
-                            HijriDateHelper.saveCachedHijriDate(appContext, cal, hijriStr)
+
+                        if (!jakimHijri.isNullOrBlank()) {
+                            HijriDateHelper.saveCachedHijriDate(appContext, cal, jakimHijri)
                             updated = true
+                        } else {
+                            val sdf = SimpleDateFormat("dd-MM-yyyy", Locale.US).apply {
+                                this.timeZone = timeZone
+                            }
+                            val dateStr = sdf.format(cal.time)
+                            val response = AladhanApiClient.service.getHijriDate(dateStr)
+                            if (response.code == 200 && response.data?.hijri != null) {
+                                val hijri = response.data.hijri
+                                val hDay = hijri.day
+                                val enMonth = hijri.month?.en ?: ""
+                                val indonesianMonth = HijriDateHelper.translateHijriMonthToIndonesian(enMonth)
+                                val hYear = hijri.year
+                                val hijriStr = "$hDay $indonesianMonth $hYear H"
+                                HijriDateHelper.saveCachedHijriDate(appContext, cal, hijriStr)
+                                updated = true
+                            }
                         }
                     }
 

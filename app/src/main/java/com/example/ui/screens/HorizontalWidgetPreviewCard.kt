@@ -29,6 +29,7 @@ import com.example.receiver.PrayerWidgetProvider.WidgetTheme
 import com.example.ui.theme.HighlightBlue
 import com.example.ui.theme.PrimaryBlue
 import com.example.utils.PrayerTimesCalculator
+import com.example.utils.WidgetLocationSyncHelper
 
 @Composable
 fun HorizontalWidgetPreviewCard(
@@ -40,6 +41,9 @@ fun HorizontalWidgetPreviewCard(
     currentPrayerName: String = "",
     countdownText: String = "",
     authorityShort: String = "Kemenag RI",
+    useAutoGps: Boolean? = null,
+    onToggleAutoGps: ((Boolean) -> Unit)? = null,
+    onRefreshWidget: (() -> Unit)? = null,
     selectedTheme: WidgetTheme? = null,
     onThemeSelected: ((WidgetTheme) -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -52,14 +56,28 @@ fun HorizontalWidgetPreviewCard(
     var internalTheme by remember {
         mutableStateOf(PrayerWidgetProvider.getSavedTheme(context))
     }
+    var internalAutoGps by remember {
+        mutableStateOf(WidgetLocationSyncHelper.isAutoGpsEnabled(context))
+    }
 
     val activeTheme = selectedTheme ?: internalTheme
+    val isAutoGpsActive = useAutoGps ?: internalAutoGps
     val isLightTheme = activeTheme == WidgetTheme.FROSTED_LIGHT
 
     val handleThemeChange: (WidgetTheme) -> Unit = { newTheme ->
         internalTheme = newTheme
         PrayerWidgetProvider.setSavedTheme(context, newTheme)
         onThemeSelected?.invoke(newTheme)
+    }
+
+    val handleAutoGpsToggle: (Boolean) -> Unit = { enabled ->
+        internalAutoGps = enabled
+        if (onToggleAutoGps != null) {
+            onToggleAutoGps(enabled)
+        } else {
+            WidgetLocationSyncHelper.setAutoGpsEnabled(context, enabled)
+            PrayerWidgetProvider.updateAllWidgets(context)
+        }
     }
 
     val hasSchedule = prayerTimes.zuhur.isNotEmpty() && prayerTimes.subuh.isNotEmpty()
@@ -225,6 +243,63 @@ fun HorizontalWidgetPreviewCard(
                 }
             }
 
+            // Real-Time GPS Auto-Sync Toggle for Home Screen Widget (FusedLocationProviderClient)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                    .border(
+                        width = 1.dp,
+                        color = if (isAutoGpsActive) {
+                            PrimaryBlue.copy(alpha = 0.45f)
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                        },
+                        shape = RoundedCornerShape(14.dp)
+                    )
+                    .clickable { handleAutoGpsToggle(!isAutoGpsActive) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag("widget_auto_gps_row"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MyLocation,
+                        contentDescription = null,
+                        tint = if (isAutoGpsActive) PrimaryBlue else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "Lokasi Otomatis GPS (Real-Time)",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (isAutoGpsActive) {
+                                "Widget otomatis mengikuti lokasi perangkat"
+                            } else {
+                                "Mode lokasi manual — ketuk untuk sinkron GPS"
+                            },
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                    }
+                }
+                Switch(
+                    checked = isAutoGpsActive,
+                    onCheckedChange = { handleAutoGpsToggle(it) },
+                    modifier = Modifier.testTag("widget_auto_gps_switch")
+                )
+            }
+
             // Live Interactive Preview of the Horizontal 4x1 One UI Widget
             // Corner radius: 24dp (container utama), 14dp (kartu item waktu sholat), flat tanpa drop-shadow
             val mainWidgetBackgroundModifier = if (isLightTheme) {
@@ -346,10 +421,14 @@ fun HorizontalWidgetPreviewCard(
                                         }
                                     )
                                     .clickable {
-                                        PrayerWidgetProvider.updateAllWidgets(context)
+                                        if (onRefreshWidget != null) {
+                                            onRefreshWidget()
+                                        } else {
+                                            PrayerWidgetProvider.updateAllWidgets(context)
+                                        }
                                         Toast.makeText(
                                             context,
-                                            "Widget Horizontal disinkronkan!",
+                                            if (isAutoGpsActive) "Menyinkronkan lokasi GPS & jadwal widget..." else "Widget Horizontal disinkronkan!",
                                             Toast.LENGTH_SHORT
                                         ).show()
                                     },

@@ -3,6 +3,7 @@ package com.example.ui
 import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import android.location.Location
 import android.media.MediaPlayer
 import androidx.lifecycle.AndroidViewModel
@@ -15,6 +16,7 @@ import com.example.data.api.MalaysiaPrayerApi
 import com.example.utils.HijriDateHelper
 import com.example.utils.PrayerAlarmScheduler
 import com.example.utils.PrayerTimesCalculator
+import com.example.utils.WidgetLocationSyncHelper
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.Dispatchers
@@ -407,7 +409,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val fusedLocationClient = LocationServices.getFusedLocationProviderClient(application)
 
+    // Keep ViewModel live-synced if PrayerWidgetProvider updates location via FusedLocationProviderClient in background
+    private val prefsChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "location_name" || key == "jakim_zone" || key == "country_code" || key == "use_auto_gps") {
+            val savedAutoGps = prefs.getBoolean("use_auto_gps", true)
+            if (_useAutoGps.value != savedAutoGps) {
+                _useAutoGps.value = savedAutoGps
+            }
+            val latestSaved = PrayerLocationCatalog.getSavedLocationPreset(getApplication())
+            val current = _currentLocation.value
+            val changed = !latestSaved.name.equals(current.name, ignoreCase = true) ||
+                latestSaved.country != current.country ||
+                !latestSaved.jakimZone.orEmpty().equals(current.jakimZone.orEmpty(), ignoreCase = true)
+            if (changed) {
+                _currentLocation.value = latestSaved
+                lastCalendarDaySignature = ""
+                syncCalendarDayIfNeeded()
+                refreshCountdown()
+            }
+        }
+    }
+
     init {
+        prefs.registerOnSharedPreferenceChangeListener(prefsChangeListener)
+        // Ensure widget real-time FusedLocationProviderClient listener is registered if eligible
+        WidgetLocationSyncHelper.registerWidgetLocationUpdates(application)
         // Reactive official API schedule fetching (Kemenag RI for Indonesia, JAKIM e-Solat for Malaysia)
         viewModelScope.launch {
             combine(_currentLocation, _currentCalendar, _manualRefreshNonce) { loc, cal, nonce ->
@@ -663,10 +689,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        prefs.unregisterOnSharedPreferenceChangeListener(prefsChangeListener)
         mediaPlayer?.release()
         mediaPlayer = null
         quranMediaPlayer?.release()
         quranMediaPlayer = null
+    }
+
+    /**
+     * Toggles automatic real-time GPS location synchronization for both the app and Home Screen widget.
+     */
+    fun setAutoGpsEnabled(enabled: Boolean) {
+        _useAutoGps.value = enabled
+        WidgetLocationSyncHelper.setAutoGpsEnabled(getApplication(), enabled)
+        if (enabled) {
+            requestDeviceLocation(forceUserRequest = true)
+        } else {
+            com.example.receiver.PrayerWidgetProvider.updateAllWidgets(getApplication())
+        }
     }
 
     /**
@@ -680,25 +720,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             hasRunStartupGps = true
         } else {
             _useAutoGps.value = true
-            prefs.edit().putBoolean("use_auto_gps", true).apply()
+            WidgetLocationSyncHelper.setAutoGpsEnabled(getApplication(), true)
         }
+
+        // Keep Home Screen widget's FusedLocationProviderClient listener active when auto-GPS is on
+        WidgetLocationSyncHelper.registerWidgetLocationUpdates(getApplication())
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
-                    if (location != null) {
-                        resolveAndApplyGpsCoordinates(location.latitude, location.longitude)
-                    } else {
-                        val tokenSource = com.google.android.gms.tasks.CancellationTokenSource()
-                        fusedLocationClient.getCurrentLocation(
-                            Priority.PRIORITY_BALANCED_POWER_ACCURACY,
-                            tokenSource.token
-                        ).addOnSuccessListener { loc: Location? ->
-                            if (loc != null) {
-                                resolveAndApplyGpsCoordinates(loc.latitude, loc.longitude)
-                            }
-                        }
-                    }
+                val deviceLocation = WidgetLocationSyncHelper.fetchCurrentDeviceLocation(
+                    context = getApplication(),
+                    forceFreshFix = forceUserRequest
+                )
+                if (deviceLocation != null) {
+                    resolveAndApplyGpsCoordinates(deviceLocation.latitude, deviceLocation.longitude)
                 }
             } catch (e: Throwable) {
                 e.printStackTrace()
@@ -708,27 +743,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun resolveAndApplyGpsCoordinates(lat: Double, lng: Double) {
         viewModelScope.launch(Dispatchers.IO) {
-            // 1. Check if coordinates fall inside Malaysia via official JAKIM zone API
-            var resolvedPreset: LocationPreset? = null
-            if (PrayerLocationCatalog.isLikelyInMalaysia(lat, lng)) {
-                resolvedPreset = MalaysiaPrayerApi.resolveZoneFromGps(lat, lng)
-                    ?: PrayerLocationCatalog.findClosestPreset(lat, lng, PrayerCountry.MALAYSIA).copy(lat = lat, lng = lng)
-            } else {
-                // Double-check against all presets (covers border areas cleanly)
-                val closestAny = PrayerLocationCatalog.findClosestPreset(lat, lng)
-                resolvedPreset = if (closestAny.country == PrayerCountry.MALAYSIA) {
-                    MalaysiaPrayerApi.resolveZoneFromGps(lat, lng) ?: closestAny.copy(lat = lat, lng = lng)
-                } else {
-                    closestAny
-                }
-            }
-
-            val finalPreset = resolvedPreset ?: PrayerLocationCatalog.findClosestPreset(lat, lng, PrayerCountry.INDONESIA)
+            val finalPreset = WidgetLocationSyncHelper.resolveLocationFromCoordinates(lat, lng)
             PrayerLocationCatalog.saveLocationPreset(getApplication(), finalPreset, isAutoGps = true)
 
             withContext(Dispatchers.Main) {
                 _useAutoGps.value = true
                 _currentLocation.value = finalPreset
+                lastCalendarDaySignature = ""
                 syncCalendarDayIfNeeded()
                 refreshCountdown()
                 com.example.receiver.PrayerWidgetProvider.updateAllWidgets(getApplication())
@@ -738,10 +759,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * User manually selected a city/zone from Indonesia or Malaysia.
-     * Disables auto-GPS overwrite so navigating back to Home/PrayerTimes preserves the user's chosen city/zone.
+     * Disables auto-GPS overwrite & unregisters widget background GPS updates so the chosen city/zone stays locked.
      */
     fun selectLocationPreset(preset: LocationPreset) {
         _useAutoGps.value = false
+        WidgetLocationSyncHelper.unregisterWidgetLocationUpdates(getApplication())
         PrayerLocationCatalog.saveLocationPreset(getApplication(), preset, isAutoGps = false)
         _currentLocation.value = preset
         lastCalendarDaySignature = "" // Force timezone-accurate calendar refresh

@@ -61,6 +61,7 @@ fun PrayerTimesScreen(
     val prayerSettings by viewModel.prayerSettings.collectAsState()
     val isLoading by viewModel.isPrayerTimesLoading.collectAsState()
     val loadError by viewModel.prayerTimesError.collectAsState()
+    val useAutoGps by viewModel.useAutoGps.collectAsState()
 
     var showCityPresetsDialog by remember { mutableStateOf(false) }
     var showSourceInfoDialog by remember { mutableStateOf(false) }
@@ -374,7 +375,30 @@ fun PrayerTimesScreen(
                     nextPrayerTime = nextPrayerTime,
                     currentPrayerName = currentPrayerName,
                     countdownText = countdownText,
-                    authorityShort = currentLocation.country.authorityShort
+                    authorityShort = currentLocation.country.authorityShort,
+                    useAutoGps = useAutoGps,
+                    onToggleAutoGps = { enabled ->
+                        if (enabled) {
+                            if (locationPermissionState.status.isGranted) {
+                                viewModel.setAutoGpsEnabled(true)
+                                Toast.makeText(context, "Lokasi otomatis GPS widget diaktifkan", Toast.LENGTH_SHORT).show()
+                            } else {
+                                viewModel.setAutoGpsEnabled(true)
+                                locationPermissionState.launchPermissionRequest()
+                            }
+                        } else {
+                            viewModel.setAutoGpsEnabled(false)
+                            Toast.makeText(context, "Widget menggunakan lokasi pilihan manual", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onRefreshWidget = {
+                        if (useAutoGps && locationPermissionState.status.isGranted) {
+                            viewModel.requestDeviceLocation(forceUserRequest = true)
+                        } else {
+                            viewModel.retryFetchPrayerTimes()
+                            com.example.receiver.PrayerWidgetProvider.updateAllWidgets(context)
+                        }
+                    }
                 )
             }
         }
