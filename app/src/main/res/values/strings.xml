@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Payo Sholat!</string>
+    <string name="widget_prayer_horizontal_name">Jadwal Sholat (Horizontal)</string>
+    <string name="widget_prayer_horizontal_desc">Widget horizontal 5 waktu sholat untuk layar utama HP Samsung &amp; Android</string>
+</resources>

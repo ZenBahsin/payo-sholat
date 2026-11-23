@@ -1,0 +1,6 @@
+{
+  "name": "Payo Sholat!",
+  "description": "Aplikasi Islami dengan Al-Qur'an, Jadwal Shalat akurat, Kompas Kiblat, dan Digital Tasbih.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

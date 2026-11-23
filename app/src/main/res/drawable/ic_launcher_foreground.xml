@@ -1,0 +1,26 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Holy golden crescent moon -->
+    <path
+        android:fillColor="#7FCFFF"
+        android:pathData="M54,24 A18,18 0 1,1 36,42 A15,15 0 1,0 54,24 Z" />
+    
+    <!-- Mosque dome below the crescent moon -->
+    <path
+        android:fillColor="#D1E4FF"
+        android:pathData="M34,75 C 34,55 42,48 54,48 C 66,48 74,55 74,75 Z" />
+
+    <!-- Dome base / trim -->
+    <path
+        android:fillColor="#0061A4"
+        android:pathData="M30,75 H78 V78 H30 Z" />
+
+    <!-- Arch doorway in the center of the dome (colored in background sleek navy) -->
+    <path
+        android:fillColor="#001D35"
+        android:pathData="M50,75 V66 C50,62 58,62 58,66 V75 Z" />
+</vector>
