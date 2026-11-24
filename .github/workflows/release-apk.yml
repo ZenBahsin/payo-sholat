@@ -57,6 +57,7 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
           # Tentukan tag rilis
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
@@ -66,9 +67,24 @@ jobs:
           fi
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
-          # Selalu siapkan debug.keystore dari debug.keystore.base64 bawaan repo
+          # Siapkan debug.keystore (dari debug.keystore.base64, secret, atau buat otomatis via keytool)
           if [ -f "debug.keystore.base64" ]; then
             tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
+          elif [ -n "${DEBUG_KEYSTORE_BASE64}" ]; then
+            printf '%s' "${DEBUG_KEYSTORE_BASE64}" | tr -d '\r\n ' | base64 -d > debug.keystore
+          fi
+
+          if [ ! -f "debug.keystore" ]; then
+            echo "debug.keystore tidak ditemukan di repo, membuat debug.keystore otomatis via keytool..."
+            keytool -genkeypair -noprompt \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
           # Pastikan .env tersedia jika dibutuhkan Secrets Gradle Plugin
