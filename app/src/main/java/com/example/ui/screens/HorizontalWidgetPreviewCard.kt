@@ -594,7 +594,7 @@ fun HorizontalWidgetPreviewCard(
                     BulletItem("1. Pilih tema widget favorit Anda di atas (Muted Slate Blue atau Frosted Light).")
                     BulletItem("2. Tekan tahan area kosong di Layar Utama (Home Screen) HP Samsung Anda atau cubit layar dengan 2 jari.")
                     BulletItem("3. Pilih menu 'Widgets' (Widget) di bagian bawah layar.")
-                    BulletItem("4. Cari 'Payo Sholat!' lalu pilih 'Jadwal Sholat (Horizontal)' berukuran 4x1.")
+                    BulletItem("4. Cari 'Payo Shalat' lalu pilih 'Jadwal Shalat (Horizontal)' berukuran 4x1.")
                     BulletItem("5. Ketuk 'Tambah' (Add) atau seret ke layar utama. Tema widget otomatis mengikuti pilihan Anda.")
                 }
             },

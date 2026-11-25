@@ -4,22 +4,25 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
-import android.location.Location
 import android.media.MediaPlayer
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.R
 import com.example.data.*
 import com.example.data.api.AladhanApiClient
 import com.example.data.api.EquranApiClient
 import com.example.data.api.MalaysiaPrayerApi
+import com.example.data.firebase.*
 import com.example.utils.HijriDateHelper
 import com.example.utils.PrayerAlarmScheduler
 import com.example.utils.PrayerTimesCalculator
 import com.example.utils.WidgetLocationSyncHelper
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -28,7 +31,25 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.*
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModelFactory(
+    private val application: Application,
+    private val userId: String?
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
+            return MainViewModel(application, userId) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+class MainViewModel(
+    application: Application,
+    private val authenticatedUid: String?
+) : AndroidViewModel(application) {
+
+    constructor(application: Application) : this(application, Firebase.auth.currentUser?.uid)
 
     data class FetchQuery(
         val location: LocationPreset,
@@ -42,6 +63,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val bookmarkRepo = BookmarkRepository(db.bookmarkDao())
     private val tasbihRepo = TasbihRepository(db.tasbihDao())
     private val prayerSettingRepo = PrayerSettingRepository(db.prayerSettingDao())
+    private val worshipRepo = UserWorshipRepository(application)
 
     private val prefs = application.getSharedPreferences("sholat_prefs", Context.MODE_PRIVATE)
 
@@ -79,6 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val useAutoGps: StateFlow<Boolean> = _useAutoGps.asStateFlow()
 
     private var hasRunStartupGps = false
+    private var hasHydratedCloudLocation = false
 
     private fun currentTimeZone(): TimeZone {
         val tzId = _currentLocation.value.timeZoneId.ifBlank {
@@ -87,7 +110,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return TimeZone.getTimeZone(tzId)
     }
 
-    // 2. Date state — ONLY updates when the calendar day or timezone changes (prevents 1s recomposition/SharedPrefs spam)
+    // 2. Date state — ONLY updates when the calendar day or timezone changes
     private val _currentCalendar = MutableStateFlow(Calendar.getInstance(currentTimeZone()))
     val currentCalendar: StateFlow<Calendar> = _currentCalendar.asStateFlow()
 
@@ -101,9 +124,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val now = Calendar.getInstance(currentTimeZone())
         val sig = calendarDaySignature(now)
         if (sig != lastCalendarDaySignature) {
+            val prevToday = WorshipDateUtils.formatDateKey(_currentCalendar.value, currentTimeZone())
             lastCalendarDaySignature = sig
             _currentCalendar.value = now
+            val newToday = WorshipDateUtils.formatDateKey(now, currentTimeZone())
+            if (_selectedScheduleDateKey.value == prevToday) {
+                _selectedScheduleDateKey.value = newToday
+            }
         }
+    }
+
+    val todayDateKey: StateFlow<String> = combine(_currentCalendar, _currentLocation) { cal, loc ->
+        WorshipDateUtils.formatDateKey(cal, TimeZone.getTimeZone(loc.timeZoneId))
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        WorshipDateUtils.formatDateKey(_currentCalendar.value, currentTimeZone())
+    )
+
+    private val _selectedScheduleDateKey = MutableStateFlow(
+        WorshipDateUtils.formatDateKey(_currentCalendar.value, currentTimeZone())
+    )
+    val selectedScheduleDateKey: StateFlow<String> = _selectedScheduleDateKey.asStateFlow()
+
+    fun selectScheduleDate(dateKey: String) {
+        _selectedScheduleDateKey.value = dateKey
     }
 
     private val _apiHijriDate = MutableStateFlow<String?>(
@@ -134,7 +179,147 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val prayerSettings: StateFlow<List<PrayerSetting>> = prayerSettingRepo.getAllSettings()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    // 4. Official API Prayer Times State (Indonesia Kemenag API / Malaysia JAKIM API — NO manual calculation)
+    // =========================================================================
+    // 4. Per-User Cloud Firestore State (Profile, Prayer Logs, Streak, Quran, Tasbih)
+    // =========================================================================
+
+    private val _cloudSyncError = MutableStateFlow<String?>(null)
+    val cloudSyncError: StateFlow<String?> = _cloudSyncError.asStateFlow()
+
+    fun clearCloudSyncError() {
+        _cloudSyncError.value = null
+    }
+
+    private val _userProfile = MutableStateFlow<UserProfileDoc?>(null)
+    val userProfile: StateFlow<UserProfileDoc?> = _userProfile.asStateFlow()
+
+    val userDisplayName: StateFlow<String> = _userProfile
+        .map { profile ->
+            profile?.fullName?.takeIf { it.isNotBlank() }
+                ?: Firebase.auth.currentUser?.displayName?.takeIf { it.isNotBlank() }
+                ?: Firebase.auth.currentUser?.email?.substringBefore("@")
+                ?: "Sahabat Ibadah"
+        }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            Firebase.auth.currentUser?.displayName?.takeIf { it.isNotBlank() } ?: "Sahabat Ibadah"
+        )
+
+    val userFirstName: StateFlow<String> = userDisplayName
+        .map { full -> full.trim().substringBefore(" ").take(20) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    val userEmail: StateFlow<String> = _userProfile
+        .map { profile -> profile?.email ?: Firebase.auth.currentUser?.email ?: "" }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Firebase.auth.currentUser?.email ?: "")
+
+    val userAvatarUrl: StateFlow<String?> = _userProfile
+        .map { profile -> profile?.avatarUrl ?: Firebase.auth.currentUser?.photoUrl?.toString() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Firebase.auth.currentUser?.photoUrl?.toString())
+
+    // Prayer Logs (Remote Firestore + Optimistic Local Overlay)
+    private val _remotePrayerLogs = MutableStateFlow<List<PrayerLogDoc>>(emptyList())
+    private val _optimisticPrayerLogs = MutableStateFlow<Map<String, PrayerLogDoc>>(emptyMap())
+
+    val allPrayerLogs: StateFlow<List<PrayerLogDoc>> = combine(
+        _remotePrayerLogs,
+        _optimisticPrayerLogs
+    ) { remote, optimistic ->
+        val merged = linkedMapOf<String, PrayerLogDoc>()
+        remote.forEach { log ->
+            val key = WorshipDateUtils.prayerLogDocId(log.prayerDate, log.prayerName)
+            merged[key] = log
+        }
+        optimistic.forEach { (key, log) ->
+            merged[key] = log
+        }
+        merged.values.toList()
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val todayPrayerLogs: StateFlow<Map<String, PrayerLogDoc>> = combine(
+        allPrayerLogs,
+        todayDateKey
+    ) { logs, today ->
+        logs.filter { it.prayerDate == today }
+            .associateBy { it.prayerName.lowercase(Locale.US) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    val selectedDatePrayerLogs: StateFlow<Map<String, PrayerLogDoc>> = combine(
+        allPrayerLogs,
+        _selectedScheduleDateKey
+    ) { logs, selectedDate ->
+        logs.filter { it.prayerDate == selectedDate }
+            .associateBy { it.prayerName.lowercase(Locale.US) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    val todayCompletedCount: StateFlow<Int> = todayPrayerLogs
+        .map { map -> WorshipDateUtils.obligatoryPrayers.count { map[it]?.completed == true } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    val selectedDateCompletedCount: StateFlow<Int> = selectedDatePrayerLogs
+        .map { map -> WorshipDateUtils.obligatoryPrayers.count { map[it]?.completed == true } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    val prayerStreakDays: StateFlow<Int> = combine(
+        allPrayerLogs,
+        _currentCalendar,
+        _currentLocation
+    ) { logs, cal, loc ->
+        WorshipDateUtils.calculatePrayerStreak(logs, cal, TimeZone.getTimeZone(loc.timeZoneId))
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    // Quran Progress (Firestore + Optimistic Overlay + Local Room Bookmark Compatibility)
+    private val _remoteQuranProgress = MutableStateFlow<QuranProgressDoc?>(null)
+    private val _optimisticQuranProgress = MutableStateFlow<QuranProgressDoc?>(null)
+
+    val quranProgress: StateFlow<QuranProgressDoc?> = combine(
+        _remoteQuranProgress,
+        _optimisticQuranProgress
+    ) { remote, optimistic ->
+        optimistic ?: remote
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val bookmarkState: StateFlow<Bookmark?> = combine(
+        quranProgress,
+        bookmarkRepo.getLastReadBookmark()
+    ) { cloud, local ->
+        if (cloud != null && cloud.lastSurahNumber > 0 && cloud.lastSurahName.isNotBlank()) {
+            Bookmark(
+                id = 1,
+                surahId = cloud.lastSurahNumber,
+                surahName = cloud.lastSurahName,
+                ayatNumber = cloud.lastAyah.coerceAtLeast(1)
+            )
+        } else {
+            local
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    // Tasbih State (Firestore + Optimistic Overlay + Local Room)
+    private val _remoteTasbih = MutableStateFlow<TasbihSessionDoc?>(null)
+    private val _optimisticTasbih = MutableStateFlow<Tasbih?>(null)
+    private var tasbihSyncJob: Job? = null
+
+    val tasbihState: StateFlow<Tasbih> = combine(
+        _optimisticTasbih,
+        _remoteTasbih,
+        tasbihRepo.getTasbih()
+    ) { optimistic, remote, local ->
+        when {
+            optimistic != null -> optimistic
+            remote != null -> Tasbih(
+                id = 1,
+                currentCount = remote.currentCount,
+                targetCount = remote.targetCount,
+                dhikrName = remote.dzikirTitle
+            )
+            local != null -> local
+            else -> Tasbih(1, 0, 100, "Subhanallah")
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, Tasbih(1, 0, 100, "Subhanallah"))
+
+    // 5. Official API Prayer Times State (Indonesia Kemenag API / Malaysia JAKIM API — NO manual calculation)
     private val emptyPrayerTimes = PrayerTimesCalculator.PrayerTimes("", "", "", "", "", "", "")
 
     private val _apiPrayerTimes = MutableStateFlow<PrayerTimesCalculator.PrayerTimes?>(
@@ -161,7 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .map { it ?: emptyPrayerTimes }
         .stateIn(viewModelScope, SharingStarted.Eagerly, _apiPrayerTimes.value ?: emptyPrayerTimes)
 
-    // 5. Next Prayer and Countdown state
+    // 6. Next Prayer, Countdown, and Solar Arc Progress state
     private val _nextPrayerName = MutableStateFlow("-")
     val nextPrayerName: StateFlow<String> = _nextPrayerName.asStateFlow()
 
@@ -174,14 +359,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _countdownText = MutableStateFlow("Memuat jadwal resmi...")
     val countdownText: StateFlow<String> = _countdownText.asStateFlow()
 
-    // 6. Tasbih State
-    val tasbihState: StateFlow<Tasbih> = tasbihRepo.getTasbih()
-        .map { it ?: Tasbih(1, 0, 33, "Subhanallah") }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), Tasbih(1, 0, 33, "Subhanallah"))
+    private val _shortCountdownPill = MutableStateFlow("Memuat...")
+    val shortCountdownPill: StateFlow<String> = _shortCountdownPill.asStateFlow()
 
-    // 7. Bookmark State (Terakhir Baca)
-    val bookmarkState: StateFlow<Bookmark?> = bookmarkRepo.getLastReadBookmark()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    private val _bannerCountdownText = MutableStateFlow("--:--")
+    val bannerCountdownText: StateFlow<String> = _bannerCountdownText.asStateFlow()
+
+    private val _solarArcProgress = MutableStateFlow(0.5f)
+    val solarArcProgress: StateFlow<Float> = _solarArcProgress.asStateFlow()
+
+    val qiblaDirectionLabel: StateFlow<String> = _currentLocation
+        .map { loc ->
+            val deg = getQiblaBearing(loc.lat, loc.lng).roundToInt()
+            val compass = bearingToCompass(deg.toDouble())
+            "${deg}° $compass"
+        }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            "${getQiblaBearing(initialLocation.lat, initialLocation.lng).roundToInt()}° ${bearingToCompass(getQiblaBearing(initialLocation.lat, initialLocation.lng))}"
+        )
+
+    private fun bearingToCompass(deg: Double): String {
+        val dirs = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+        val index = (((deg + 22.5) % 360.0) / 45.0).toInt().coerceIn(0, 7)
+        return dirs[index]
+    }
 
     // --- Quran API Fetched States ---
     private val _quranSurahs = MutableStateFlow<List<Surah>>(emptyList())
@@ -407,8 +610,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _azanSound = MutableStateFlow(prefs.getString("azan_sound", "Makkah") ?: "Makkah")
     val azanSound: StateFlow<String> = _azanSound.asStateFlow()
 
-    private val fusedLocationClient = LocationServices.getFusedLocationProviderClient(application)
-
     // Keep ViewModel live-synced if PrayerWidgetProvider updates location via FusedLocationProviderClient in background
     private val prefsChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "location_name" || key == "jakim_zone" || key == "country_code" || key == "use_auto_gps") {
@@ -432,8 +633,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         prefs.registerOnSharedPreferenceChangeListener(prefsChangeListener)
-        // Ensure widget real-time FusedLocationProviderClient listener is registered if eligible
         WidgetLocationSyncHelper.registerWidgetLocationUpdates(application)
+
+        // Start per-user Firestore synchronization when authenticated
+        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid
+        if (uid != null) {
+            startFirestoreSync(uid)
+        }
+
         // Reactive official API schedule fetching (Kemenag RI for Indonesia, JAKIM e-Solat for Malaysia)
         viewModelScope.launch {
             combine(_currentLocation, _currentCalendar, _manualRefreshNonce) { loc, cal, nonce ->
@@ -445,30 +652,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     refreshNonce = nonce
                 )
             }
-            .distinctUntilChanged()
-            .collectLatest { query ->
-                val cacheKey = "${query.location.country.code}-${query.location.jakimZone ?: query.location.name}-${query.year}-${query.month}-${query.day}"
-                val cached = apiScheduleCache[cacheKey]
-                    ?: PrayerAlarmScheduler.getCachedPrayerTimesSync(
-                        application,
-                        query.location,
-                        query.year,
-                        query.month,
-                        query.day
-                    )
-                if (cached != null) {
-                    apiScheduleCache[cacheKey] = cached
-                    _apiPrayerTimes.value = cached
-                    _isPrayerTimesLoading.value = false
-                    _prayerTimesError.value = null
-                    refreshCountdown()
-                } else {
-                    _apiPrayerTimes.value = null
-                    _isPrayerTimesLoading.value = true
-                    _prayerTimesError.value = null
+                .distinctUntilChanged()
+                .collectLatest { query ->
+                    val cacheKey = "${query.location.country.code}-${query.location.jakimZone ?: query.location.name}-${query.year}-${query.month}-${query.day}"
+                    val cached = apiScheduleCache[cacheKey]
+                        ?: PrayerAlarmScheduler.getCachedPrayerTimesSync(
+                            application,
+                            query.location,
+                            query.year,
+                            query.month,
+                            query.day
+                        )
+                    if (cached != null) {
+                        apiScheduleCache[cacheKey] = cached
+                        _apiPrayerTimes.value = cached
+                        _isPrayerTimesLoading.value = false
+                        _prayerTimesError.value = null
+                        refreshCountdown()
+                    } else {
+                        _apiPrayerTimes.value = null
+                        _isPrayerTimesLoading.value = true
+                        _prayerTimesError.value = null
+                    }
+                    fetchOfficialSchedule(query, cacheKey)
                 }
-                fetchOfficialSchedule(query, cacheKey)
-            }
         }
 
         // Fetch Aladhan Hijri Date reactively when calendar day or location timezone changes
@@ -479,29 +686,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 Triple(sdf.format(cal.time), cal, loc)
             }
-            .distinctUntilChanged { old, new ->
-                old.first == new.first && old.third.country == new.third.country
-            }
-            .collectLatest { (dateStr, cal, loc) ->
-                if (loc.country == PrayerCountry.MALAYSIA) {
-                    val zone = loc.jakimZone ?: "WLY01"
-                    val cachedMy = MalaysiaPrayerApi.getCachedDailyPrayerTimesSync(
-                        application,
-                        zone,
-                        cal.get(Calendar.YEAR),
-                        cal.get(Calendar.MONTH) + 1,
-                        cal.get(Calendar.DAY_OF_MONTH)
-                    )
-                    if (!cachedMy?.hijriDateFormatted.isNullOrBlank()) {
-                        _apiHijriDate.value = cachedMy?.hijriDateFormatted
-                        return@collectLatest
-                    }
+                .distinctUntilChanged { old, new ->
+                    old.first == new.first && old.third.country == new.third.country
                 }
-                fetchAladhanHijri(dateStr, cal)
-            }
+                .collectLatest { (dateStr, cal, loc) ->
+                    if (loc.country == PrayerCountry.MALAYSIA) {
+                        val zone = loc.jakimZone ?: "WLY01"
+                        val cachedMy = MalaysiaPrayerApi.getCachedDailyPrayerTimesSync(
+                            application,
+                            zone,
+                            cal.get(Calendar.YEAR),
+                            cal.get(Calendar.MONTH) + 1,
+                            cal.get(Calendar.DAY_OF_MONTH)
+                        )
+                        if (!cachedMy?.hijriDateFormatted.isNullOrBlank()) {
+                            _apiHijriDate.value = cachedMy?.hijriDateFormatted
+                            return@collectLatest
+                        }
+                    }
+                    fetchAladhanHijri(dateStr, cal)
+                }
         }
 
-        // Start live 1-second countdown refresh loop (without mutating _currentCalendar unless day changes!)
+        // Start live 1-second countdown + solar arc refresh loop
         viewModelScope.launch {
             while (true) {
                 refreshCountdown()
@@ -514,11 +721,241 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             combine(prayerTimes, prayerSettings, _azanSound) { times, settings, sound ->
                 Triple(times, settings, sound)
             }
-            .distinctUntilChanged()
-            .collect { (times, settings, sound) ->
-                if (times.zuhur.isNotEmpty() && times.subuh.isNotEmpty()) {
-                    PrayerAlarmScheduler.scheduleAlarms(application, times, settings, sound)
+                .distinctUntilChanged()
+                .collect { (times, settings, sound) ->
+                    if (times.zuhur.isNotEmpty() && times.subuh.isNotEmpty()) {
+                        PrayerAlarmScheduler.scheduleAlarms(application, times, settings, sound)
+                    }
                 }
+        }
+    }
+
+    private fun startFirestoreSync(uid: String) {
+        // 1. Ensure user profile doc exists in Firestore
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentUser = Firebase.auth.currentUser
+            if (currentUser != null && currentUser.uid == uid) {
+                worshipRepo.ensureUserProfile(currentUser, _currentLocation.value)
+            }
+        }
+
+        // 2. Observe User Profile
+        viewModelScope.launch {
+            worshipRepo.observeUserProfile(uid).collect { state ->
+                when (state) {
+                    is UiState.Success -> {
+                        val profile = state.data
+                        _userProfile.value = profile
+                        if (profile != null && !hasHydratedCloudLocation) {
+                            hasHydratedCloudLocation = true
+                            val cloudPreset = resolveCloudProfileToPreset(profile)
+                            if (cloudPreset != null) {
+                                _currentLocation.value = cloudPreset
+                                PrayerLocationCatalog.saveLocationPreset(
+                                    getApplication(),
+                                    cloudPreset,
+                                    isAutoGps = _useAutoGps.value
+                                )
+                                lastCalendarDaySignature = ""
+                                syncCalendarDayIfNeeded()
+                                refreshCountdown()
+                            }
+                        }
+                    }
+                    is UiState.Error -> {
+                        _cloudSyncError.value = state.message
+                    }
+                    UiState.Loading -> Unit
+                }
+            }
+        }
+
+        // 3. Observe Prayer Logs (Real-time sync with Optimistic UI reconciliation)
+        viewModelScope.launch {
+            worshipRepo.observePrayerLogs(uid).collect { state ->
+                when (state) {
+                    is UiState.Success -> {
+                        _remotePrayerLogs.value = state.data
+                        val remoteById = state.data.associateBy {
+                            WorshipDateUtils.prayerLogDocId(it.prayerDate, it.prayerName)
+                        }
+                        _optimisticPrayerLogs.update { current ->
+                            current.filterNot { (k, opt) ->
+                                val rem = remoteById[k]
+                                rem != null && rem.completed == opt.completed && rem.prayMode == opt.prayMode
+                            }
+                        }
+                    }
+                    is UiState.Error -> {
+                        _cloudSyncError.value = state.message
+                    }
+                    UiState.Loading -> Unit
+                }
+            }
+        }
+
+        // 4. Observe Quran Progress
+        viewModelScope.launch {
+            worshipRepo.observeQuranProgress(uid).collect { state ->
+                when (state) {
+                    is UiState.Success -> {
+                        _remoteQuranProgress.value = state.data
+                        _optimisticQuranProgress.value = null
+                        val cloud = state.data
+                        if (cloud != null && cloud.lastSurahNumber > 0 && cloud.lastSurahName.isNotBlank()) {
+                            viewModelScope.launch(Dispatchers.IO) {
+                                bookmarkRepo.saveBookmark(
+                                    cloud.lastSurahNumber,
+                                    cloud.lastSurahName,
+                                    cloud.lastAyah.coerceAtLeast(1)
+                                )
+                            }
+                        }
+                    }
+                    is UiState.Error -> {
+                        _cloudSyncError.value = state.message
+                    }
+                    UiState.Loading -> Unit
+                }
+            }
+        }
+
+        // 5. Observe Tasbih Session
+        viewModelScope.launch {
+            worshipRepo.observeTasbihSession(uid).collect { state ->
+                when (state) {
+                    is UiState.Success -> {
+                        val cloud = state.data
+                        _remoteTasbih.value = cloud
+                        if (cloud != null) {
+                            val opt = _optimisticTasbih.value
+                            if (opt != null &&
+                                opt.currentCount == cloud.currentCount &&
+                                opt.targetCount == cloud.targetCount &&
+                                opt.dhikrName == cloud.dzikirTitle
+                            ) {
+                                _optimisticTasbih.value = null
+                            }
+                            viewModelScope.launch(Dispatchers.IO) {
+                                tasbihRepo.saveTasbih(
+                                    Tasbih(
+                                        id = 1,
+                                        currentCount = cloud.currentCount,
+                                        targetCount = cloud.targetCount,
+                                        dhikrName = cloud.dzikirTitle
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    is UiState.Error -> {
+                        _cloudSyncError.value = state.message
+                    }
+                    UiState.Loading -> Unit
+                }
+            }
+        }
+    }
+
+    private fun resolveCloudProfileToPreset(profile: UserProfileDoc): LocationPreset? {
+        val country = if (profile.countryCode == "MY") PrayerCountry.MALAYSIA else PrayerCountry.INDONESIA
+        val catalog = if (country == PrayerCountry.MALAYSIA) {
+            PrayerLocationCatalog.malaysiaPresets
+        } else {
+            PrayerLocationCatalog.indonesiaPresets
+        }
+        val matched = if (country == PrayerCountry.MALAYSIA && !profile.jakimZone.isNullOrBlank()) {
+            catalog.find { it.jakimZone.equals(profile.jakimZone, ignoreCase = true) }
+        } else {
+            catalog.find { it.name.equals(profile.city, ignoreCase = true) }
+        }
+        return matched ?: LocationPreset(
+            name = profile.city.ifBlank { "Palembang" },
+            region = profile.region ?: if (country == PrayerCountry.MALAYSIA) "Malaysia" else "Indonesia",
+            lat = profile.latitude,
+            lng = profile.longitude,
+            country = country,
+            timeZoneId = profile.timeZoneId.ifBlank {
+                if (country == PrayerCountry.MALAYSIA) "Asia/Kuala_Lumpur" else "Asia/Jakarta"
+            },
+            jakimZone = profile.jakimZone
+        )
+    }
+
+    // =========================================================================
+    // Optimistic UI Prayer Tracker & Streak Mutations
+    // =========================================================================
+
+    fun togglePrayerCompletion(dateKey: String, prayerName: String) {
+        val normalized = prayerName.lowercase(Locale.US)
+        if (normalized !in WorshipDateUtils.obligatoryPrayers) return
+        val docId = WorshipDateUtils.prayerLogDocId(dateKey, normalized)
+        val existing = allPrayerLogs.value.find {
+            it.prayerDate == dateKey && it.prayerName.equals(normalized, ignoreCase = true)
+        }
+        val newCompleted = !(existing?.completed ?: false)
+        val currentMode = existing?.prayMode ?: "sendiri"
+        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+
+        val optimisticDoc = PrayerLogDoc(
+            id = docId,
+            userId = uid,
+            prayerDate = dateKey,
+            prayerName = normalized,
+            completed = newCompleted,
+            prayMode = currentMode
+        )
+
+        // Instant Optimistic UI update
+        _optimisticPrayerLogs.update { it + (docId to optimisticDoc) }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = worshipRepo.upsertPrayerLog(
+                prayerDate = dateKey,
+                prayerName = normalized,
+                completed = newCompleted,
+                prayMode = currentMode
+            )
+            result.onFailure { err ->
+                // Revert optimistic state on failure
+                _optimisticPrayerLogs.update { it - docId }
+                _cloudSyncError.value = err.localizedMessage ?: "Gagal menyimpan status shalat."
+            }
+        }
+    }
+
+    fun togglePrayerMode(dateKey: String, prayerName: String) {
+        val normalized = prayerName.lowercase(Locale.US)
+        if (normalized !in WorshipDateUtils.obligatoryPrayers) return
+        val docId = WorshipDateUtils.prayerLogDocId(dateKey, normalized)
+        val existing = allPrayerLogs.value.find {
+            it.prayerDate == dateKey && it.prayerName.equals(normalized, ignoreCase = true)
+        }
+        val nextMode = if (existing?.prayMode == "berjamaah_masjid") "sendiri" else "berjamaah_masjid"
+        val completed = existing?.completed ?: true
+        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+
+        val optimisticDoc = PrayerLogDoc(
+            id = docId,
+            userId = uid,
+            prayerDate = dateKey,
+            prayerName = normalized,
+            completed = completed,
+            prayMode = nextMode
+        )
+
+        _optimisticPrayerLogs.update { it + (docId to optimisticDoc) }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = worshipRepo.upsertPrayerLog(
+                prayerDate = dateKey,
+                prayerName = normalized,
+                completed = completed,
+                prayMode = nextMode
+            )
+            result.onFailure { err ->
+                _optimisticPrayerLogs.update { it - docId }
+                _cloudSyncError.value = err.localizedMessage ?: "Gagal memperbarui mode shalat."
             }
         }
     }
@@ -559,7 +996,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 month = query.month,
                 day = query.day
             )
-            // If Malaysia API also provided official JAKIM Hijri date, sync it right away
             val jakimHijri = if (query.location.country == PrayerCountry.MALAYSIA) {
                 MalaysiaPrayerApi.getCachedDailyPrayerTimesSync(
                     getApplication(),
@@ -591,7 +1027,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Refresh countdown based on official API prayer times
+    // Refresh countdown & real-time Solar Arc progress based on official API prayer times
     private var lastPlayedAlarmTime: String? = null
     private var lastSyncedWidgetSignature: String? = null
     private var mediaPlayer: MediaPlayer? = null
@@ -603,6 +1039,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (times.zuhur.isEmpty() || times.subuh.isEmpty()) {
             if (_isPrayerTimesLoading.value) {
                 _countdownText.value = "Memuat jadwal ${_currentLocation.value.country.authorityShort}..."
+                _shortCountdownPill.value = "Memuat..."
+                _bannerCountdownText.value = "--:--"
             }
             return
         }
@@ -635,6 +1073,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _nextPrayerName.value = status.nextPrayerName
         _nextPrayerTime.value = status.nextPrayerTime
         _countdownText.value = status.countdownText
+
+        // Compute real-time Solar Arc progress (0f..1f) + crisp short pill & banner countdown
+        val prayerSeconds = prayerTimeStrings.map { PrayerTimesCalculator.parseTimeToSeconds(it) }
+        val nextIdx = prayerNames.indexOfFirst { it.equals(status.nextPrayerName, ignoreCase = true) }
+        if (!status.isAfterIsya && nextIdx != -1) {
+            val targetSec = prayerSeconds[nextIdx]
+            val prevSec = if (nextIdx > 0) prayerSeconds[nextIdx - 1] else 0
+            val span = (targetSec - prevSec).coerceAtLeast(60)
+            val elapsed = (currentSeconds - prevSec).coerceIn(0, span)
+            _solarArcProgress.value = (elapsed.toFloat() / span.toFloat()).coerceIn(0.05f, 0.96f)
+
+            val diff = (targetSec - currentSeconds).coerceAtLeast(0)
+            val h = diff / 3600
+            val m = (diff % 3600) / 60
+            val s = diff % 60
+            _shortCountdownPill.value = when {
+                h > 0 -> "${h}j ${m}m lagi"
+                m > 0 -> "$m menit lagi"
+                else -> "$s detik lagi"
+            }
+            _bannerCountdownText.value = when {
+                h > 0 -> "${h}j ${m}m ${s}d"
+                m > 0 -> "${m}m ${s}d"
+                else -> "${s}d"
+            }
+        } else {
+            _solarArcProgress.value = 0.92f
+            _shortCountdownPill.value = "Waktu Isya"
+            _bannerCountdownText.value = "Waktu Isya"
+        }
 
         val loc = _currentLocation.value
         val widgetSignature = "${loc.widgetDisplayName()}|${loc.country.code}|${hijriDateString.value}|${status.widgetBadgeText}|${status.widgetHighlightedPrayer}|${times.subuh}|${times.zuhur}|${times.asar}|${times.maghrib}|${times.isya}"
@@ -696,9 +1164,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         quranMediaPlayer = null
     }
 
-    /**
-     * Toggles automatic real-time GPS location synchronization for both the app and Home Screen widget.
-     */
     fun setAutoGpsEnabled(enabled: Boolean) {
         _useAutoGps.value = enabled
         WidgetLocationSyncHelper.setAutoGpsEnabled(getApplication(), enabled)
@@ -709,10 +1174,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Requests GPS only if auto-GPS is enabled and hasn't run on startup yet (or when user explicitly requests GPS).
-     * Automatically detects whether user is in Malaysia (resolving official JAKIM zone via API) or Indonesia!
-     */
     @SuppressLint("MissingPermission")
     fun requestDeviceLocation(forceUserRequest: Boolean = false) {
         if (!forceUserRequest) {
@@ -723,7 +1184,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             WidgetLocationSyncHelper.setAutoGpsEnabled(getApplication(), true)
         }
 
-        // Keep Home Screen widget's FusedLocationProviderClient listener active when auto-GPS is on
         WidgetLocationSyncHelper.registerWidgetLocationUpdates(getApplication())
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -745,6 +1205,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val finalPreset = WidgetLocationSyncHelper.resolveLocationFromCoordinates(lat, lng)
             PrayerLocationCatalog.saveLocationPreset(getApplication(), finalPreset, isAutoGps = true)
+            worshipRepo.updateUserLocationAndPrefs(finalPreset)
 
             withContext(Dispatchers.Main) {
                 _useAutoGps.value = true
@@ -757,19 +1218,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * User manually selected a city/zone from Indonesia or Malaysia.
-     * Disables auto-GPS overwrite & unregisters widget background GPS updates so the chosen city/zone stays locked.
-     */
     fun selectLocationPreset(preset: LocationPreset) {
         _useAutoGps.value = false
         WidgetLocationSyncHelper.unregisterWidgetLocationUpdates(getApplication())
         PrayerLocationCatalog.saveLocationPreset(getApplication(), preset, isAutoGps = false)
         _currentLocation.value = preset
-        lastCalendarDaySignature = "" // Force timezone-accurate calendar refresh
+        lastCalendarDaySignature = ""
         syncCalendarDayIfNeeded()
         refreshCountdown()
         com.example.receiver.PrayerWidgetProvider.updateAllWidgets(getApplication())
+
+        viewModelScope.launch(Dispatchers.IO) {
+            worshipRepo.updateUserLocationAndPrefs(preset)
+        }
     }
 
     fun updateAzanSound(sound: String) {
@@ -777,9 +1238,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit()
             .putString("azan_sound", sound)
             .apply()
+        syncNotificationPrefsToCloud()
     }
 
-    // Prayer Setting Alert toggles
     fun togglePrayerSetting(prayerName: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val current = prayerSettings.value.find { it.prayerName.equals(prayerName, ignoreCase = true) }
@@ -798,57 +1259,125 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 prayerSettingRepo.saveSetting(PrayerSetting(prayerName, true, "ADZAN"))
             }
+            syncNotificationPrefsToCloud()
         }
     }
 
-    // Tasbih Actions
-    fun incrementTasbih() {
+    private fun syncNotificationPrefsToCloud() {
         viewModelScope.launch(Dispatchers.IO) {
-            val current = tasbihState.value
-            tasbihRepo.saveTasbih(current.copy(currentCount = current.currentCount + 1))
+            val prefsMap = buildMap<String, String> {
+                put("azanSound", _azanSound.value)
+                prayerSettings.value.take(10).forEach { setting ->
+                    put(setting.prayerName, setting.alertType)
+                }
+            }
+            worshipRepo.updateUserLocationAndPrefs(_currentLocation.value, prefsMap)
         }
     }
 
-    fun decrementTasbih() {
+    // Tasbih Actions (Optimistic UI + Room + Debounced Cloud Sync)
+    private fun applyTasbihUpdate(updated: Tasbih) {
+        _optimisticTasbih.value = updated
         viewModelScope.launch(Dispatchers.IO) {
-            val current = tasbihState.value
-            if (current.currentCount > 0) {
-                tasbihRepo.saveTasbih(current.copy(currentCount = current.currentCount - 1))
+            tasbihRepo.saveTasbih(updated)
+        }
+        tasbihSyncJob?.cancel()
+        tasbihSyncJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(350) // Coalesce rapid taps cleanly before writing to Firestore
+            worshipRepo.saveTasbihSession(
+                dzikirTitle = updated.dhikrName,
+                currentCount = updated.currentCount,
+                targetCount = updated.targetCount
+            ).onFailure { err ->
+                _cloudSyncError.value = err.localizedMessage ?: "Gagal menyimpan tasbih ke cloud."
             }
         }
     }
 
-    fun resetTasbih() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val current = tasbihState.value
-            tasbihRepo.saveTasbih(current.copy(currentCount = 0))
+    fun incrementTasbih() {
+        val current = tasbihState.value
+        applyTasbihUpdate(current.copy(currentCount = current.currentCount + 1))
+    }
+
+    fun decrementTasbih() {
+        val current = tasbihState.value
+        if (current.currentCount > 0) {
+            applyTasbihUpdate(current.copy(currentCount = current.currentCount - 1))
         }
+    }
+
+    fun resetTasbih() {
+        val current = tasbihState.value
+        applyTasbihUpdate(current.copy(currentCount = 0))
     }
 
     fun updateDhikrName(name: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val current = tasbihState.value
-            tasbihRepo.saveTasbih(current.copy(dhikrName = name))
-        }
+        val current = tasbihState.value
+        applyTasbihUpdate(current.copy(dhikrName = name))
     }
 
     fun updateTasbihTarget(target: Int) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val current = tasbihState.value
-            tasbihRepo.saveTasbih(current.copy(targetCount = target))
-        }
+        val current = tasbihState.value
+        applyTasbihUpdate(current.copy(targetCount = target.coerceAtLeast(1)))
     }
 
-    // Bookmark actions
+    // Quran Bookmark & Khatam Progress Actions (Optimistic + Room + Firestore)
     fun saveQuranBookmark(surahId: Int, surahName: String, ayatNumber: Int) {
+        val totalAyahs = WorshipDateUtils.computeCumulativeAyahs(surahId, ayatNumber)
+        val pct = WorshipDateUtils.computeKhatamPercentage(totalAyahs)
+        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+        val existingBookmarks = quranProgress.value?.bookmarks ?: emptyList()
+        val entry = "$surahId:$ayatNumber"
+        val updatedBookmarks = (listOf(entry) + existingBookmarks.filterNot { it == entry }).take(20)
+
+        _optimisticQuranProgress.value = QuranProgressDoc(
+            id = "main",
+            userId = uid,
+            lastSurahNumber = surahId,
+            lastSurahName = surahName,
+            lastAyah = ayatNumber,
+            totalAyahsRead = totalAyahs,
+            khatamPercentage = pct,
+            bookmarks = updatedBookmarks
+        )
+
         viewModelScope.launch(Dispatchers.IO) {
             bookmarkRepo.saveBookmark(surahId, surahName, ayatNumber)
+            worshipRepo.saveQuranProgress(
+                surahNumber = surahId,
+                surahName = surahName,
+                ayahNumber = ayatNumber,
+                totalAyahsRead = totalAyahs,
+                khatamPercentage = pct,
+                bookmarks = updatedBookmarks
+            ).onFailure { err ->
+                _cloudSyncError.value = err.localizedMessage ?: "Gagal menyinkronkan progres Al-Qur'an."
+            }
         }
     }
 
     fun deleteQuranBookmark() {
+        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+        _optimisticQuranProgress.value = QuranProgressDoc(
+            id = "main",
+            userId = uid,
+            lastSurahNumber = 0,
+            lastSurahName = "",
+            lastAyah = 0,
+            totalAyahsRead = 0,
+            khatamPercentage = 0,
+            bookmarks = emptyList()
+        )
         viewModelScope.launch(Dispatchers.IO) {
             bookmarkRepo.deleteBookmark()
+            worshipRepo.saveQuranProgress(
+                surahNumber = 0,
+                surahName = "",
+                ayahNumber = 0,
+                totalAyahsRead = 0,
+                khatamPercentage = 0,
+                bookmarks = emptyList()
+            )
         }
     }
 

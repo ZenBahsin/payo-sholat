@@ -648,7 +648,7 @@ fun SettingsScreen(
                             Text("Informasi Aplikasi", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                         Text(
-                            "Payo Sholat! dikembangkan untuk mempermudah ibadah umat Muslim sehari-hari secara akurat, responsif, dan offline-first.",
+                            "Payo Shalat — Asisten Ibadah Harianmu yang akurat, responsif, dan tersinkronisasi aman di cloud.",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                             lineHeight = 18.sp
@@ -658,7 +658,7 @@ fun SettingsScreen(
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             Text(
-                                text = "versi 1.0 (Payo Sholat! production build)",
+                                text = "versi 2.0 (Payo Shalat)",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                                 lineHeight = 14.sp

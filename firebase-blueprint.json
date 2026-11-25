@@ -1,0 +1,209 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Per-user profile, location preferences, and notification settings stored under /users/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID matching the document ID."
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Display name of the user."
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address (strictly owner-private)."
+        },
+        "avatarUrl": {
+          "type": "string",
+          "description": "Optional profile photo URL."
+        },
+        "city": {
+          "type": "string",
+          "description": "Selected city or JAKIM zone name (default: Kota Palembang)."
+        },
+        "region": {
+          "type": "string",
+          "description": "Province (Indonesia) or State/Negeri (Malaysia)."
+        },
+        "countryCode": {
+          "type": "string",
+          "enum": ["ID", "MY"],
+          "description": "Country code determining official prayer schedule API."
+        },
+        "jakimZone": {
+          "type": "string",
+          "description": "Optional official Malaysia JAKIM zone code (e.g. WLY01)."
+        },
+        "timeZoneId": {
+          "type": "string",
+          "description": "IANA timezone ID (e.g. Asia/Jakarta, Asia/Kuala_Lumpur)."
+        },
+        "latitude": {
+          "type": "number",
+          "description": "User location latitude."
+        },
+        "longitude": {
+          "type": "number",
+          "description": "User location longitude."
+        },
+        "notificationPrefs": {
+          "type": "object",
+          "description": "Map of prayer name to alert mode (ADZAN, BEEP, SILENT)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when last updated."
+        }
+      },
+      "required": ["userId", "fullName", "city", "countryCode", "timeZoneId", "latitude", "longitude", "createdAt", "updatedAt"]
+    },
+    "PrayerLog": {
+      "title": "Prayer Log",
+      "description": "Daily prayer completion record uniquely keyed by YYYY-MM-DD_prayerName per user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated owner UID."
+        },
+        "prayerDate": {
+          "type": "string",
+          "description": "Gregorian date in YYYY-MM-DD format."
+        },
+        "prayerName": {
+          "type": "string",
+          "enum": ["subuh", "zuhur", "asar", "maghrib", "isya"],
+          "description": "Obligatory prayer identifier."
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "Whether the prayer has been completed."
+        },
+        "prayMode": {
+          "type": "string",
+          "enum": ["sendiri", "berjamaah_masjid"],
+          "description": "Prayer mode (individually or congregation at mosque)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when first recorded."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when last modified."
+        }
+      },
+      "required": ["userId", "prayerDate", "prayerName", "completed", "prayMode", "createdAt", "updatedAt"]
+    },
+    "QuranProgress": {
+      "title": "Quran Progress",
+      "description": "Last read Surah/Ayah, Khatam progress percentage, and saved ayah bookmarks.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated owner UID."
+        },
+        "lastSurahNumber": {
+          "type": "integer",
+          "description": "Last read Surah number (0-114)."
+        },
+        "lastSurahName": {
+          "type": "string",
+          "description": "Name of last read Surah."
+        },
+        "lastAyah": {
+          "type": "integer",
+          "description": "Last read Ayah number."
+        },
+        "totalAyahsRead": {
+          "type": "integer",
+          "description": "Estimated cumulative ayahs read toward 6236 Khatam target."
+        },
+        "khatamPercentage": {
+          "type": "integer",
+          "description": "Percentage completion (0-100) toward Khatam target."
+        },
+        "bookmarks": {
+          "type": "array",
+          "description": "Bounded list of bookmarked ayah references (surahId:ayahNumber)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when last updated."
+        }
+      },
+      "required": ["userId", "lastSurahNumber", "lastSurahName", "lastAyah", "totalAyahsRead", "khatamPercentage", "createdAt", "updatedAt"]
+    },
+    "TasbihSession": {
+      "title": "Tasbih Session",
+      "description": "Digital tasbih dhikr counter state per user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated owner UID."
+        },
+        "dzikirTitle": {
+          "type": "string",
+          "description": "Current dhikr phrase title (e.g. Subhanallah)."
+        },
+        "currentCount": {
+          "type": "integer",
+          "description": "Current dhikr count."
+        },
+        "targetCount": {
+          "type": "integer",
+          "description": "Target dhikr count (e.g. 33, 99, 100)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when last updated."
+        }
+      },
+      "required": ["userId", "dzikirTitle", "currentCount", "targetCount", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-private user profile, city/zone preferences, and notification settings."
+    },
+    "/users/{userId}/prayer_logs/{logId}": {
+      "schema": { "$ref": "#/entities/PrayerLog" },
+      "description": "Owner-private daily prayer checklist logs for streak and history calculation."
+    },
+    "/users/{userId}/quran_progress/{docId}": {
+      "schema": { "$ref": "#/entities/QuranProgress" },
+      "description": "Owner-private Quran reading progress, Khatam percentage, and bookmarks."
+    },
+    "/users/{userId}/tasbih_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/TasbihSession" },
+      "description": "Owner-private digital tasbih dhikr sessions."
+    }
+  }
+}

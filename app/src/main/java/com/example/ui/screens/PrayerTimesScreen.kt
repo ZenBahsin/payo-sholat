@@ -2,116 +2,185 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.widget.Toast
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.data.PrayerCountry
 import com.example.data.PrayerSetting
+import com.example.data.firebase.PrayerLogDoc
+import com.example.data.firebase.WorshipDateUtils
 import com.example.ui.MainViewModel
 import com.example.ui.components.LocationPickerDialog
+import com.example.ui.theme.*
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
+import java.text.SimpleDateFormat
+import java.util.*
+
+private data class WeeklyDayItem(
+    val dateKey: String,
+    val dayShort: String,
+    val dayNumber: String,
+    val fullReadableDate: String,
+    val isToday: Boolean
+)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalPermissionsApi::class)
 @Composable
 fun PrayerTimesScreen(
     viewModel: MainViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    showBackButton: Boolean = false,
+    bottomContentPadding: PaddingValues = PaddingValues(0.dp)
 ) {
     val context = LocalContext.current
 
     val currentLocation by viewModel.currentLocation.collectAsState()
     val locationName by viewModel.locationName.collectAsState()
-    val gregorianDate by viewModel.gregorianDateString.collectAsState()
+    val currentCalendar by viewModel.currentCalendar.collectAsState()
     val hijriDate by viewModel.hijriDateString.collectAsState()
     val prayerTimes by viewModel.prayerTimes.collectAsState()
     val nextPrayerName by viewModel.nextPrayerName.collectAsState()
     val currentPrayerName by viewModel.currentPrayerName.collectAsState()
     val nextPrayerTime by viewModel.nextPrayerTime.collectAsState()
     val countdownText by viewModel.countdownText.collectAsState()
+    val bannerCountdownText by viewModel.bannerCountdownText.collectAsState()
     val prayerSettings by viewModel.prayerSettings.collectAsState()
     val isLoading by viewModel.isPrayerTimesLoading.collectAsState()
     val loadError by viewModel.prayerTimesError.collectAsState()
     val useAutoGps by viewModel.useAutoGps.collectAsState()
 
+    val todayDateKey by viewModel.todayDateKey.collectAsState()
+    val selectedDateKey by viewModel.selectedScheduleDateKey.collectAsState()
+    val selectedDateLogs by viewModel.selectedDatePrayerLogs.collectAsState()
+    val selectedDateCompletedCount by viewModel.selectedDateCompletedCount.collectAsState()
+
     var showCityPresetsDialog by remember { mutableStateOf(false) }
     var showSourceInfoDialog by remember { mutableStateOf(false) }
 
-    // Setup permission state using Accompanist
     val locationPermissionState = rememberPermissionState(
         permission = Manifest.permission.ACCESS_FINE_LOCATION
     )
 
-    // Only auto-detect GPS on startup if user hasn't picked a manual location
     LaunchedEffect(locationPermissionState.status.isGranted) {
         if (locationPermissionState.status.isGranted) {
             viewModel.requestDeviceLocation(forceUserRequest = false)
         }
     }
 
+    // Build 7-day interactive weekly date strip (5 past days + today + 1 upcoming day)
+    val weeklyDays = remember(currentCalendar, currentLocation.timeZoneId, todayDateKey) {
+        val tz = TimeZone.getTimeZone(currentLocation.timeZoneId.ifBlank { "Asia/Jakarta" })
+        val idLocale = Locale("id", "ID")
+        val dayShortFmt = SimpleDateFormat("EEE", idLocale).apply { timeZone = tz }
+        val dayNumFmt = SimpleDateFormat("dd", Locale.US).apply { timeZone = tz }
+        val fullFmt = SimpleDateFormat("d MMMM yyyy", idLocale).apply { timeZone = tz }
+
+        (-4..2).map { offset ->
+            val cal = (currentCalendar.clone() as Calendar).apply {
+                timeZone = tz
+                add(Calendar.DAY_OF_MONTH, offset)
+            }
+            val key = WorshipDateUtils.formatDateKey(cal, tz)
+            val rawShort = dayShortFmt.format(cal.time).replace(".", "")
+            val cleanShort = rawShort.take(3).replaceFirstChar { it.uppercase(idLocale) }
+            WeeklyDayItem(
+                dateKey = key,
+                dayShort = cleanShort,
+                dayNumber = dayNumFmt.format(cal.time),
+                fullReadableDate = fullFmt.format(cal.time),
+                isToday = key == todayDateKey
+            )
+        }
+    }
+
+    val selectedDayItem = weeklyDays.find { it.dateKey == selectedDateKey }
+    val isViewingToday = selectedDateKey == todayDateKey
+
     Scaffold(
+        containerColor = WarmCream,
         topBar = {
             TopAppBar(
-                title = { Text("Jadwal Shalat", fontWeight = FontWeight.Bold) },
+                title = {
+                    Column {
+                        Text(
+                            text = "Jadwal & Riwayat",
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = DeepForestCharcoal
+                        )
+                        Text(
+                            text = "${currentLocation.widgetDisplayName()} • ${currentLocation.country.authorityShort}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MutedOliveGray,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Kembali")
+                    if (showBackButton) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "Kembali",
+                                tint = DeepForestCharcoal
+                            )
+                        }
                     }
                 },
                 actions = {
-                    // Manual selection city/zone (Indonesia & Malaysia)
-                    IconButton(onClick = { showCityPresetsDialog = true }) {
-                        Icon(Icons.Default.LocationCity, contentDescription = "Pilih Lokasi")
-                    }
-                    // Explicit GPS trigger
                     IconButton(
-                        onClick = {
-                            if (locationPermissionState.status.isGranted) {
-                                viewModel.requestDeviceLocation(forceUserRequest = true)
-                                Toast.makeText(context, "Mendeteksi lokasi GPS...", Toast.LENGTH_SHORT).show()
-                            } else {
-                                locationPermissionState.launchPermissionRequest()
-                            }
-                        }
+                        onClick = { showCityPresetsDialog = true },
+                        modifier = Modifier.testTag("schedule_location_button")
                     ) {
-                        Icon(Icons.Default.MyLocation, contentDescription = "Gunakan GPS")
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = "Pilih Lokasi",
+                            tint = DeepSage
+                        )
                     }
-                    // Official API Source info
                     IconButton(onClick = { showSourceInfoDialog = true }) {
-                        Icon(Icons.Default.Info, contentDescription = "Sumber Jadwal Resmi")
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Sumber Jadwal Resmi",
+                            tint = MutedOliveGray
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
+                    containerColor = WarmCream
                 )
             )
         }
@@ -119,162 +188,168 @@ fun PrayerTimesScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .background(MaterialTheme.colorScheme.background),
-            contentPadding = PaddingValues(16.dp),
+                .padding(top = innerPadding.calculateTopPadding())
+                .background(WarmCream),
+            contentPadding = PaddingValues(
+                start = 20.dp,
+                end = 20.dp,
+                top = 6.dp,
+                bottom = bottomContentPadding.calculateBottomPadding() + 24.dp
+            ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Hero display for today and active status (matching design spec but refined)
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(
-                                brush = Brush.verticalGradient(
-                                    colors = listOf(
-                                        MaterialTheme.colorScheme.primary,
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
-                                    )
-                                )
-                            )
-                            .padding(20.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    modifier = Modifier.clickable { showCityPresetsDialog = true }
-                                ) {
-                                    Icon(
-                                        Icons.Default.LocationOn,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = currentLocation.widgetDisplayName(),
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp
-                                    )
-                                    Icon(
-                                        Icons.Default.KeyboardArrowDown,
-                                        contentDescription = "Ganti Lokasi",
-                                        tint = Color.White.copy(alpha = 0.85f),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = gregorianDate,
-                                    color = Color.White.copy(alpha = 0.9f),
-                                    fontSize = 12.sp
-                                )
-                                Text(
-                                    text = hijriDate,
-                                    color = Color.White.copy(alpha = 0.8f),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Light
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                // Main Countdown Callout
-                                Text(
-                                    text = if (nextPrayerName == "Isya" && countdownText.contains("Telah")) {
-                                        "Sekarang: Isya • $nextPrayerTime"
-                                    } else {
-                                        "Selanjutnya: $nextPrayerName • $nextPrayerTime"
-                                    },
-                                    color = Color.White,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 18.sp
-                                )
-                            }
-
-                            // Beautiful Animated Alarm Countdown Bubble
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(Color.White.copy(alpha = 0.15f))
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.Center
-                                ) {
-                                    AnimatedTimerIcon()
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text(
-                                        text = countdownText,
-                                        color = Color.White,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        fontSize = 11.sp,
-                                        textAlign = TextAlign.Center
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Official API Source Badge Indicator
+            // 1. PEMILIH TANGGAL MINGGUAN (7 HARI) — Warm Sand Gold active pill
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Jadwal Shalat Hari Ini",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    SuggestionChip(
-                        onClick = { showSourceInfoDialog = true },
-                        label = {
-                            Text(
-                                text = "API: ${currentLocation.country.authorityShort}",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                        },
-                        colors = SuggestionChipDefaults.suggestionChipColors(
-                            labelColor = MaterialTheme.colorScheme.primary
+                    weeklyDays.forEach { day ->
+                        val isSelected = day.dateKey == selectedDateKey
+                        val pillBg by animateColorAsState(
+                            targetValue = if (isSelected) WarmSandGold else Color.Transparent,
+                            animationSpec = tween(220),
+                            label = "day_pill_${day.dateKey}"
                         )
-                    )
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(pillBg)
+                                .clickable { viewModel.selectScheduleDate(day.dateKey) }
+                                .padding(vertical = 10.dp)
+                                .testTag("week_day_${day.dateKey}")
+                        ) {
+                            Text(
+                                text = day.dayShort,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isSelected) PureWhite.copy(alpha = 0.92f) else MutedOliveGray,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = day.dayNumber,
+                                style = TabularNumberTextStyle.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.sp
+                                ),
+                                color = if (isSelected) PureWhite else DeepForestCharcoal
+                            )
+                            if (day.isToday) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(5.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) PureWhite else WarmSandGold)
+                                )
+                            } else {
+                                Spacer(modifier = Modifier.height(5.dp))
+                            }
+                        }
+                    }
                 }
             }
 
-            // Loading / Offline Error Banner (No manual calculation fallback!)
+            // 2. BANNER COUNTDOWN RINGKAS (Deep Sage + Serene Landscape Artwork on Right)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = DeepSage),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(104.dp)
+                            .background(
+                                Brush.horizontalGradient(
+                                    colors = listOf(DeepSageDark, DeepSage, Color(0xFF5A775F))
+                                )
+                            ),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1.15f)
+                                .padding(start = 18.dp, top = 14.dp, bottom = 14.dp, end = 8.dp),
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = if (isViewingToday) {
+                                    "Maju ke $nextPrayerName dalam"
+                                } else {
+                                    "Riwayat Ibadah"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = PureWhite.copy(alpha = 0.88f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (isViewingToday) {
+                                    bannerCountdownText
+                                } else {
+                                    selectedDayItem?.fullReadableDate ?: selectedDateKey
+                                },
+                                style = TabularNumberTextStyle.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = if (isViewingToday) 26.sp else 18.sp
+                                ),
+                                color = PureWhite,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // Softly blended golden-sunrise mountain lake illustration on right
+                        Box(
+                            modifier = Modifier
+                                .weight(0.95f)
+                                .fillMaxHeight()
+                                .padding(6.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.img_prayer_landscape_1795596473260),
+                                contentDescription = "Lanskap Waktu Shalat",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            colors = listOf(
+                                                DeepSage.copy(alpha = 0.35f),
+                                                Color.Transparent
+                                            )
+                                        )
+                                    )
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Loading / Offline Error Banner
             if (isLoading || loadError != null) {
                 item {
-                    Card(
+                    Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (loadError != null) {
-                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
-                            } else {
-                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                            }
-                        )
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (loadError != null) MaterialTheme.colorScheme.errorContainer else SoftSageLight,
+                        border = BorderStroke(1.dp, SageBorder)
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(14.dp),
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -286,24 +361,25 @@ fun PrayerTimesScreen(
                                 if (isLoading) {
                                     CircularProgressIndicator(
                                         modifier = Modifier.size(18.dp),
-                                        strokeWidth = 2.dp
+                                        strokeWidth = 2.dp,
+                                        color = DeepSage
                                     )
                                 } else {
                                     Icon(
-                                        Icons.Default.CloudOff,
+                                        imageVector = Icons.Default.CloudOff,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.error
                                     )
                                 }
                                 Text(
                                     text = loadError ?: "Mengambil jadwal resmi ${currentLocation.country.authorityShort}...",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = DeepForestCharcoal
                                 )
                             }
                             if (loadError != null) {
                                 TextButton(onClick = { viewModel.retryFetchPrayerTimes() }) {
-                                    Text("Muat Ulang", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    Text("Muat Ulang", color = DeepSage, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -311,53 +387,58 @@ fun PrayerTimesScreen(
                 }
             }
 
-            // List of prayer timings
+            // 3. DAFTAR JADWAL & TRACKER SHALAT (Imsak .. Isya)
             item {
-                Card(
+                Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    shape = RoundedCornerShape(22.dp),
+                    color = PureWhite,
+                    border = BorderStroke(1.dp, SageBorder),
+                    shadowElevation = 2.dp
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        val items = listOf(
-                            PrayerRowData("Imsak", prayerTimes.imsak.ifEmpty { "--:--" }, Icons.Default.Bedtime),
-                            PrayerRowData("Subuh", prayerTimes.subuh.ifEmpty { "--:--" }, Icons.Default.WbTwilight),
-                            PrayerRowData("Syuruq", prayerTimes.syuruq.ifEmpty { "--:--" }, Icons.Default.WbSunny),
-                            PrayerRowData("Zuhur", prayerTimes.zuhur.ifEmpty { "--:--" }, Icons.Default.WbSunny),
-                            PrayerRowData("Asar", prayerTimes.asar.ifEmpty { "--:--" }, Icons.Default.CloudQueue),
-                            PrayerRowData("Maghrib", prayerTimes.maghrib.ifEmpty { "--:--" }, Icons.Default.WbTwilight),
-                            PrayerRowData("Isya", prayerTimes.isya.ifEmpty { "--:--" }, Icons.Default.NightsStay)
+                        val rows = listOf(
+                            ScheduleRowSpec("Imsak", "imsak", prayerTimes.imsak.ifEmpty { "--:--" }, Icons.Default.Bedtime, false),
+                            ScheduleRowSpec("Subuh", "subuh", prayerTimes.subuh.ifEmpty { "--:--" }, Icons.Default.WbTwilight, true),
+                            ScheduleRowSpec("Syuruq", "syuruq", prayerTimes.syuruq.ifEmpty { "--:--" }, Icons.Default.WbSunny, false),
+                            ScheduleRowSpec("Zuhur", "zuhur", prayerTimes.zuhur.ifEmpty { "--:--" }, Icons.Default.LightMode, true),
+                            ScheduleRowSpec("Asar", "asar", prayerTimes.asar.ifEmpty { "--:--" }, Icons.Default.WbCloudy, true),
+                            ScheduleRowSpec("Maghrib", "maghrib", prayerTimes.maghrib.ifEmpty { "--:--" }, Icons.Default.NightsStay, true),
+                            ScheduleRowSpec("Isya", "isya", prayerTimes.isya.ifEmpty { "--:--" }, Icons.Default.DarkMode, true)
                         )
 
-                        items.forEach { prayer ->
-                            val setting = prayerSettings.find { it.prayerName == prayer.name } ?: PrayerSetting(prayer.name, true, "ADZAN")
-                            val isNext = nextPrayerName.equals(prayer.name, ignoreCase = true)
-                            val isCurrent = currentPrayerName.equals(prayer.name, ignoreCase = true)
+                        rows.forEach { row ->
+                            val setting = prayerSettings.find { it.prayerName.equals(row.label, ignoreCase = true) }
+                                ?: PrayerSetting(row.label, true, "ADZAN")
+                            val log: PrayerLogDoc? = selectedDateLogs[row.key]
+                            val isActive = isViewingToday && currentPrayerName.equals(row.label, ignoreCase = true)
+                            val isNext = isViewingToday && nextPrayerName.equals(row.label, ignoreCase = true)
 
-                            PrayerTimeRow(
-                                name = prayer.name,
-                                time = prayer.time,
-                                icon = prayer.icon,
+                            OrganicPrayerTrackerRow(
+                                spec = row,
                                 setting = setting,
-                                isCurrent = isCurrent,
+                                log = log,
+                                isActive = isActive,
                                 isNext = isNext,
-                                countdownText = formatShortCountdown(countdownText),
-                                onToggleAlarm = {
-                                    viewModel.togglePrayerSetting(prayer.name)
+                                onToggleCheck = {
+                                    viewModel.togglePrayerCompletion(selectedDateKey, row.key)
+                                },
+                                onToggleMode = {
+                                    viewModel.togglePrayerMode(selectedDateKey, row.key)
+                                },
+                                onToggleAlert = {
+                                    viewModel.togglePrayerSetting(row.label)
                                     val feedback = when (setting.alertType) {
                                         "ADZAN" -> "Diubah ke Pengingat Bip"
-                                        "BEEP" -> "Diubah ke Senyap/Mute"
+                                        "BEEP" -> "Diubah ke Senyap"
                                         else -> "Diubah ke Alarm Adzan"
                                     }
-                                    Toast.makeText(context, "${prayer.name}: $feedback", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "${row.label}: $feedback", Toast.LENGTH_SHORT).show()
                                 }
                             )
                         }
@@ -365,7 +446,21 @@ fun PrayerTimesScreen(
                 }
             }
 
-            // Horizontal Samsung Home Screen Widget Preview & Quick Installer
+            // 4. KARTU RINGKASAN BAWAH ("Ibadah Hari Ini: X/5" + Animated Circular Progress Ring)
+            item {
+                WorshipSummaryRingCard(
+                    title = if (isViewingToday) {
+                        "Ibadah Hari Ini: $selectedDateCompletedCount/5"
+                    } else {
+                        "Ibadah ${selectedDayItem?.dayShort ?: ""}: $selectedDateCompletedCount/5"
+                    },
+                    subtitle = "Shalat Tercatat",
+                    completedCount = selectedDateCompletedCount,
+                    totalCount = 5
+                )
+            }
+
+            // 5. Horizontal Samsung Home Screen Widget Preview (preserved cleanly below)
             item {
                 HorizontalWidgetPreviewCard(
                     locationName = currentLocation.widgetDisplayName(),
@@ -404,7 +499,6 @@ fun PrayerTimesScreen(
         }
     }
 
-    // Unified Indonesia & Malaysia Location/Zone Picker Dialog
     if (showCityPresetsDialog) {
         LocationPickerDialog(
             currentLocationName = locationName,
@@ -430,64 +524,62 @@ fun PrayerTimesScreen(
         )
     }
 
-    // Official API Source Info Dialog (No Manual Calculation)
     if (showSourceInfoDialog) {
         AlertDialog(
             onDismissRequest = { showSourceInfoDialog = false },
-            title = { Text("Sumber Jadwal Resmi", fontWeight = FontWeight.Bold) },
+            containerColor = PureWhite,
+            title = {
+                Text(
+                    text = "Sumber Jadwal Resmi",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = DeepForestCharcoal
+                )
+            },
             text = {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "Aplikasi Payo Sholat! mengambil jadwal shalat langsung dari API resmi pemerintah tanpa perhitungan manual:",
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp
+                        text = "Aplikasi Payo Shalat mengambil jadwal shalat langsung dari sumber resmi pemerintah tanpa perhitungan manual:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MutedOliveGray
                     )
                     Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (currentLocation.country == PrayerCountry.INDONESIA) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (currentLocation.country == PrayerCountry.INDONESIA) SoftSageLight else SoftIvory,
+                        border = BorderStroke(1.dp, SageBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                text = "🇮🇩 Indonesia — Kemenag RI",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.primary
+                                text = "Indonesia — Kemenag RI",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = DeepSage
                             )
                             Text(
-                                text = "Menggunakan data Bimas Islam Kemenag RI via API resmi Equran.id (WIB / WITA / WIT).",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                                text = "Data Bimas Islam Kemenag RI resmi (WIB / WITA / WIT).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MutedOliveGray
                             )
                         }
                     }
                     Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (currentLocation.country == PrayerCountry.MALAYSIA) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (currentLocation.country == PrayerCountry.MALAYSIA) SoftSageLight else SoftIvory,
+                        border = BorderStroke(1.dp, SageBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                text = "🇲🇾 Malaysia — JAKIM e-Solat",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.primary
+                                text = "Malaysia — JAKIM e-Solat",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = DeepSage
                             )
                             Text(
-                                text = "Menggunakan data takwim solat rasmi JAKIM (e-Solat & Waktu Solat API Malaysia) mengikut zon rasmi (MYT / GMT+8).",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                                text = "Takwim solat rasmi JAKIM mengikut zon rasmi Malaysia (MYT / GMT+8).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MutedOliveGray
                             )
                         }
                     }
@@ -498,262 +590,362 @@ fun PrayerTimesScreen(
                     showSourceInfoDialog = false
                     showCityPresetsDialog = true
                 }) {
-                    Text("Ganti Lokasi / Negara", fontWeight = FontWeight.Bold)
+                    Text("Ganti Lokasi", color = DeepSage, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showSourceInfoDialog = false }) {
-                    Text("Tutup")
+                    Text("Tutup", color = MutedOliveGray)
                 }
             }
         )
     }
 }
 
-data class PrayerRowData(
-    val name: String,
+private data class ScheduleRowSpec(
+    val label: String,
+    val key: String,
     val time: String,
-    val icon: androidx.compose.ui.graphics.vector.ImageVector
+    val icon: ImageVector,
+    val isObligatory: Boolean
 )
 
 @Composable
-fun PrayerTimeRow(
-    name: String,
-    time: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+private fun OrganicPrayerTrackerRow(
+    spec: ScheduleRowSpec,
     setting: PrayerSetting,
-    isCurrent: Boolean,
+    log: PrayerLogDoc?,
+    isActive: Boolean,
     isNext: Boolean,
-    countdownText: String?,
-    onToggleAlarm: () -> Unit
+    onToggleCheck: () -> Unit,
+    onToggleMode: () -> Unit,
+    onToggleAlert: () -> Unit
 ) {
-    // Choose beautiful background color & border for the active/current row
-    val rowBgColor = if (isCurrent) {
-        MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
-    } else {
-        Color.Transparent
-    }
-    
-    val rowBorderModifier = if (isCurrent) {
-        Modifier.border(1.5.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(24.dp))
-    } else {
-        Modifier
+    val isCompleted = log?.completed == true
+    val isBerjamaah = log?.prayMode == "berjamaah_masjid"
+
+    val containerColor = when {
+        isActive -> SoftSageLight
+        isNext -> WarmSandGoldSoft.copy(alpha = 0.45f)
+        else -> Color.Transparent
     }
 
-    // Hand-crafted colors for each prayer's celestial state
-    val prayerIconColor = when (name.lowercase()) {
-        "imsak" -> Color(0xFF7E57C2)      // Deep spiritual violet/purple
-        "subuh" -> Color(0xFF0288D1)      // Dawn sky blue
-        "syuruq" -> Color(0xFFF57C00)     // Sunrise golden orange
-        "zuhur" -> Color(0xFFFBC02D)      // Noon bright sun gold
-        "asar" -> Color(0xFFE65100)       // Afternoon warm sunset orange
-        "maghrib" -> Color(0xFFD81B60)    // Sunset dark crimson/pink
-        "isya" -> Color(0xFF3F51B5)       // Starry night navy/indigo
-        else -> MaterialTheme.colorScheme.onSurface
+    val borderStroke = when {
+        isActive -> BorderStroke(1.dp, DeepSage.copy(alpha = 0.35f))
+        isNext -> BorderStroke(1.dp, WarmSandGold.copy(alpha = 0.35f))
+        else -> null
     }
 
-    val textColor = MaterialTheme.colorScheme.onSurface
-
-    // Interactive notification status colors
-    val alertColor = when (setting.alertType) {
-        "ADZAN" -> MaterialTheme.colorScheme.primary // Rich brand blue
-        "BEEP" -> Color(0xFF00ACC1) // Vibrant modern cyan-teal for general alert
-        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f) // Soft slate grey for silence
+    val iconTint = when (spec.key) {
+        "imsak" -> Color(0xFF7B6B9B)
+        "subuh" -> WarmSandGold
+        "syuruq" -> Color(0xFFD9953B)
+        "zuhur" -> Color(0xFFC8A258)
+        "asar" -> Color(0xFFCD8B45)
+        "maghrib" -> Color(0xFFBD6E4C)
+        "isya" -> DeepSage
+        else -> DeepSage
     }
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .then(rowBorderModifier)
-            .testTag("prayer_row_${name.lowercase()}"),
-        color = rowBgColor
+            .testTag("prayer_row_${spec.key}"),
+        shape = RoundedCornerShape(16.dp),
+        color = containerColor,
+        border = borderStroke
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = if (isActive) 13.dp else 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Part 1: Left (Icon and Name)
+            // Left: Icon + Name + Active Status
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.width(110.dp) // Fixed width to align all name labels & badges perfectly!
+                modifier = Modifier.weight(1f)
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = prayerIconColor,
-                    modifier = Modifier.size(24.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isActive) PureWhite.copy(alpha = 0.78f) else SoftIvory
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = spec.icon,
+                        contentDescription = null,
+                        tint = iconTint,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
 
-                Text(
-                    text = name,
-                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
-                    fontSize = 16.sp,
-                    color = textColor
-                )
-            }
-
-            // Part 2: Middle (Countdown or Status badge)
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 12.dp), // Pushes the badge slightly to the right with comfortable breathing room!
-                contentAlignment = Alignment.CenterStart
-            ) {
-                if (isCurrent) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = spec.label,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = if (isActive || isNext) FontWeight.Bold else FontWeight.SemiBold,
+                        color = DeepForestCharcoal
+                    )
+                    if (isActive) {
                         Text(
-                            text = "Sekarang",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            text = "Aktif Sekarang",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = DeepSage,
+                            fontWeight = FontWeight.SemiBold
                         )
-                    }
-                } else if (isNext && countdownText != null) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
+                    } else if (spec.isObligatory && isCompleted) {
                         Text(
-                            text = "dalam $countdownText",
-                            color = MaterialTheme.colorScheme.primary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            text = if (isBerjamaah) "Berjamaah di Masjid" else "Tercatat • Sendiri",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MutedOliveGray,
+                            modifier = Modifier.clickable(onClick = onToggleMode)
                         )
                     }
                 }
             }
 
-            // Part 3: Right (Time String & Alert Button)
+            // Right: Time (or single-line "Berikutnya • HH:mm") + Optional Berjamaah Toggle + Check / Audio Button
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = time,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 17.sp,
-                    color = textColor
-                )
-
-                // Speaker alarm option toggle button
-                IconButton(
-                    onClick = onToggleAlarm, 
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    val alertIcon = when (setting.alertType) {
-                        "ADZAN" -> Icons.Default.VolumeUp
-                        "BEEP" -> Icons.Default.NotificationsActive
-                        else -> Icons.Default.VolumeMute
+                Column(horizontalAlignment = Alignment.End) {
+                    if (isNext) {
+                        Text(
+                            text = "Berikutnya • ${spec.time}",
+                            style = TabularNumberTextStyle.copy(
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            ),
+                            color = DeepForestCharcoal,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    } else {
+                        Text(
+                            text = spec.time,
+                            style = TabularNumberTextStyle.copy(
+                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.SemiBold,
+                                fontSize = 15.sp
+                            ),
+                            color = DeepForestCharcoal,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
-                    Icon(
-                        imageVector = alertIcon,
-                        contentDescription = "Notifikasi",
-                        tint = alertColor,
-                        modifier = Modifier.size(22.dp) // Perfect consistent touch size and visual balance
+
+                    if (isActive && spec.isObligatory) {
+                        Text(
+                            text = if (isBerjamaah) "Berjamaah di Masjid" else "Tap: Berjamaah",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 10.sp,
+                            color = DeepSage,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(onClick = onToggleMode)
+                                .padding(horizontal = 2.dp, vertical = 1.dp)
+                        )
+                    }
+                }
+
+                if (spec.isObligatory) {
+                    // Subtle notification toggle icon
+                    IconButton(
+                        onClick = onToggleAlert,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        val alertIcon = when (setting.alertType) {
+                            "ADZAN" -> Icons.Default.VolumeUp
+                            "BEEP" -> Icons.Default.NotificationsActive
+                            else -> Icons.Default.VolumeOff
+                        }
+                        val alertTint = when (setting.alertType) {
+                            "ADZAN" -> DeepSage.copy(alpha = 0.72f)
+                            "BEEP" -> WarmSandGoldDark
+                            else -> MutedOliveGray.copy(alpha = 0.42f)
+                        }
+                        Icon(
+                            imageVector = alertIcon,
+                            contentDescription = "Notifikasi ${spec.label}",
+                            tint = alertTint,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+
+                    // Interactive Prayer Checklist Circle (48.dp touch area)
+                    val checkBg by animateColorAsState(
+                        targetValue = if (isCompleted) DeepSage else Color.Transparent,
+                        animationSpec = tween(200),
+                        label = "check_bg_${spec.key}"
                     )
+                    val checkBorder by animateColorAsState(
+                        targetValue = if (isCompleted) DeepSage else MutedOliveGray.copy(alpha = 0.45f),
+                        animationSpec = tween(200),
+                        label = "check_border_${spec.key}"
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .clickable(onClick = onToggleCheck)
+                            .testTag("schedule_check_${spec.key}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .clip(CircleShape)
+                                .background(checkBg)
+                                .border(1.6.dp, checkBorder, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isCompleted) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "${spec.label} selesai",
+                                    tint = PureWhite,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // Non-obligatory row (Imsak / Syuruq): Audio/Notification Toggle
+                    IconButton(
+                        onClick = onToggleAlert,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("schedule_alert_${spec.key}")
+                    ) {
+                        val alertIcon = when (setting.alertType) {
+                            "ADZAN" -> Icons.Default.VolumeUp
+                            "BEEP" -> Icons.Default.NotificationsActive
+                            else -> Icons.Default.VolumeOff
+                        }
+                        Icon(
+                            imageVector = alertIcon,
+                            contentDescription = "Notifikasi ${spec.label}",
+                            tint = if (setting.alertType == "SILENT") MutedOliveGray.copy(alpha = 0.45f) else DeepSage,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
         }
-    }
-}
-
-private fun formatShortCountdown(fullText: String): String {
-    if (fullText.contains("Telah", ignoreCase = true) || fullText.contains("Memasuki", ignoreCase = true)) {
-        return "Tiba"
-    }
-    // Input format example: "5 jam 54 menit 39 detik lagi"
-    val text = fullText.replace(" lagi", "").trim()
-    
-    val hourPattern = "(\\d+)\\s*jam".toRegex()
-    val minutePattern = "(\\d+)\\s*menit".toRegex()
-    val secondPattern = "(\\d+)\\s*detik".toRegex()
-    
-    val hourMatch = hourPattern.find(text)
-    val minuteMatch = minutePattern.find(text)
-    val secondMatch = secondPattern.find(text)
-    
-    val h = hourMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-    val m = minuteMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-    val s = secondMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-    
-    return when {
-        h > 0 -> "${h}j ${m}m"
-        m > 0 -> "${m}m"
-        else -> "${s}d"
     }
 }
 
 @Composable
-fun AnimatedTimerIcon(modifier: Modifier = Modifier) {
-    val infiniteTransition = rememberInfiniteTransition(label = "timer_transition")
-    
-    // Smooth pulse/scale effect
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 0.9f,
-        targetValue = 1.1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scale"
-    )
-    
-    // Continuous rotation of an outer ring
-    val rotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(3000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rotation"
+private fun WorshipSummaryRingCard(
+    title: String,
+    subtitle: String,
+    completedCount: Int,
+    totalCount: Int
+) {
+    val targetFraction = (completedCount.toFloat() / totalCount.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+    val animatedFraction by animateFloatAsState(
+        targetValue = targetFraction,
+        animationSpec = tween(durationMillis = 500),
+        label = "worship_ring_fraction"
     )
 
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = modifier.size(40.dp)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("schedule_summary_card"),
+        shape = RoundedCornerShape(22.dp),
+        color = PureWhite,
+        border = BorderStroke(1.dp, SageBorder),
+        shadowElevation = 2.dp
     ) {
-        // Glowing background circle
-        Box(
+        Row(
             modifier = Modifier
-                .size(32.dp)
-                .scale(scale)
-                .background(Color.White.copy(alpha = 0.25f), shape = CircleShape)
-        )
-        
-        // Outer rotating ring
-        Canvas(
-            modifier = Modifier
-                .size(36.dp)
-                .rotate(rotation)
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            drawCircle(
-                color = Color.White.copy(alpha = 0.4f),
-                radius = size.minDimension / 2f,
-                style = Stroke(
-                    width = 2.dp.toPx(),
-                    pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
-                        floatArrayOf(10f, 10f), 0f
-                    )
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(
+                    text = title,
+                    style = TabularNumberTextStyle.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp
+                    ),
+                    color = DeepForestCharcoal
                 )
-            )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MutedOliveGray
+                )
+            }
+
+            // Concentric Organic Circular Progress Ring
+            Box(
+                modifier = Modifier.size(54.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val strokeOuter = 6.dp.toPx()
+                    val strokeInner = 4.dp.toPx()
+                    drawArc(
+                        color = SoftSage,
+                        startAngle = -90f,
+                        sweepAngle = 360f,
+                        useCenter = false,
+                        style = Stroke(width = strokeOuter, cap = StrokeCap.Round)
+                    )
+                    if (animatedFraction > 0f) {
+                        drawArc(
+                            color = DeepSage,
+                            startAngle = -90f,
+                            sweepAngle = 360f * animatedFraction,
+                            useCenter = false,
+                            style = Stroke(width = strokeOuter, cap = StrokeCap.Round)
+                        )
+                    }
+                    // Subtle inner Warm Sand Gold accent ring
+                    val inset = 9.dp.toPx()
+                    drawArc(
+                        color = WarmSandGoldSoft,
+                        startAngle = -90f,
+                        sweepAngle = 360f,
+                        useCenter = false,
+                        topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+                        size = androidx.compose.ui.geometry.Size(size.width - inset * 2, size.height - inset * 2),
+                        style = Stroke(width = strokeInner, cap = StrokeCap.Round)
+                    )
+                    if (animatedFraction > 0f) {
+                        drawArc(
+                            color = WarmSandGold,
+                            startAngle = -90f,
+                            sweepAngle = 360f * animatedFraction,
+                            useCenter = false,
+                            topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+                            size = androidx.compose.ui.geometry.Size(size.width - inset * 2, size.height - inset * 2),
+                            style = Stroke(width = strokeInner, cap = StrokeCap.Round)
+                        )
+                    }
+                }
+                Text(
+                    text = "$completedCount",
+                    style = TabularNumberTextStyle.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    ),
+                    color = DeepForestCharcoal
+                )
+            }
         }
-        
-        // Timer/Alarm icon in center
-        Icon(
-            imageVector = Icons.Default.Alarm,
-            contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier.size(20.dp)
-        )
     }
 }

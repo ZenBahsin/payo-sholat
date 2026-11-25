@@ -917,7 +917,7 @@ fun shareHadith(context: Context, hadith: HadithItem) {
         appendLine()
         appendLine("💡 *Hikmah:* ${hadith.hikmah}")
         appendLine()
-        appendLine("Dibagikan dari aplikasi Payo Sholat!")
+        appendLine("Dibagikan dari aplikasi Payo Shalat")
     }
     val sendIntent = Intent().apply {
         action = Intent.ACTION_SEND
