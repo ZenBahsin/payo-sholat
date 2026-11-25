@@ -37,6 +37,20 @@ object GoogleAuthHelper {
     private const val TAG = "Auth"
 
     /**
+     * Resolves the Google Services generated `default_web_client_id` string resource at runtime.
+     * Avoids compile-time breakage in CI environments where `app/google-services.json` is injected via secrets.
+     */
+    private fun resolveWebClientId(context: Context): String? {
+        val resId = context.resources.getIdentifier(
+            "default_web_client_id",
+            "string",
+            context.packageName
+        )
+        if (resId == 0) return null
+        return context.getString(resId).trim().takeIf { it.isNotEmpty() }
+    }
+
+    /**
      * Silent auto sign-in for returning users using GetGoogleIdOption (single option in request).
      */
     suspend fun attemptAutoSignIn(activityContext: Context): AuthOutcome {
@@ -44,7 +58,11 @@ object GoogleAuthHelper {
             return AuthOutcome.Success(Firebase.auth.currentUser!!)
         }
         return try {
-            val webClientId = activityContext.getString(R.string.default_web_client_id)
+            val webClientId = resolveWebClientId(activityContext)
+            if (webClientId == null) {
+                Log.w(TAG, "default_web_client_id not found; ensure app/google-services.json is configured.")
+                return AuthOutcome.Cancelled
+            }
             val credentialManager = CredentialManager.create(activityContext)
             val googleIdOption = GetGoogleIdOption.Builder()
                 .setFilterByAuthorizedAccounts(true)
@@ -83,7 +101,11 @@ object GoogleAuthHelper {
      */
     suspend fun signInWithGoogle(activityContext: Context): AuthOutcome {
         return try {
-            val webClientId = activityContext.getString(R.string.default_web_client_id)
+            val webClientId = resolveWebClientId(activityContext)
+            if (webClientId == null) {
+                Log.e(TAG, "default_web_client_id missing; app/google-services.json was not present during build.")
+                return AuthOutcome.Error("Konfigurasi Firebase (google-services.json) belum terpasang pada build APK ini.")
+            }
             val credentialManager = CredentialManager.create(activityContext)
             val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(webClientId)
                 .build()

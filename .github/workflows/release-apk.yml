@@ -58,6 +58,8 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           # Tentukan tag rilis
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
@@ -66,6 +68,19 @@ jobs:
             RELEASE_TAG="${{ inputs.version_tag }}"
           fi
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Siapkan app/google-services.json dari GitHub Secret jika belum ada di repo
+          if [ ! -f "app/google-services.json" ]; then
+            if [ -n "${GOOGLE_SERVICES_JSON_BASE64}" ]; then
+              printf '%s' "${GOOGLE_SERVICES_JSON_BASE64}" | tr -d '\r\n ' | base64 -d > app/google-services.json
+              echo "Berhasil memuat app/google-services.json dari secret GOOGLE_SERVICES_JSON_BASE64."
+            elif [ -n "${GOOGLE_SERVICES_JSON}" ]; then
+              printf '%s' "${GOOGLE_SERVICES_JSON}" > app/google-services.json
+              echo "Berhasil memuat app/google-services.json dari secret GOOGLE_SERVICES_JSON."
+            else
+              echo "::warning::app/google-services.json tidak ditemukan. Tambahkan GitHub Secret GOOGLE_SERVICES_JSON atau GOOGLE_SERVICES_JSON_BASE64 agar Firebase Auth & Firestore aktif pada APK rilis."
+            fi
+          fi
 
           # Siapkan debug.keystore (dari debug.keystore.base64, secret, atau buat otomatis via keytool)
           if [ -f "debug.keystore.base64" ]; then
@@ -142,10 +157,10 @@ jobs:
 
           if [ "${TYPE}" = "release" ]; then
             SRC_APK="app/build/outputs/apk/release/app-release.apk"
-            DEST_NAME="PayoSholat-${TAG}-release.apk"
+            DEST_NAME="PayoShalat-${TAG}-release.apk"
           else
             SRC_APK="app/build/outputs/apk/debug/app-debug.apk"
-            DEST_NAME="PayoSholat-${TAG}.apk"
+            DEST_NAME="PayoShalat-${TAG}.apk"
           fi
 
           if [ ! -f "${SRC_APK}" ]; then
@@ -173,10 +188,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.config.outputs.release_tag }}
-          name: Payo Sholat! ${{ steps.config.outputs.release_tag }}
+          name: Payo Shalat ${{ steps.config.outputs.release_tag }}
           generate_release_notes: true
           body: |
-            ## Payo Sholat! (${{ steps.config.outputs.release_tag }})
+            ## Payo Shalat (${{ steps.config.outputs.release_tag }})
 
             - **File APK**: `${{ steps.package.outputs.apk_name }}`
             - **Tipe Build**: `${{ steps.config.outputs.build_type }}`
