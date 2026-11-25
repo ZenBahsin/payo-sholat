@@ -343,7 +343,7 @@ fun AuthScreen(
                             text = if (isFirebaseReady) {
                                 "Tersinkronisasi otomatis antar perangkat"
                             } else {
-                                "Tambahkan secret GOOGLE_SERVICES_JSON untuk sinkronisasi cloud"
+                                "Riwayat ibadahmu tersimpan langsung di perangkat ini"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MutedOliveGray,
