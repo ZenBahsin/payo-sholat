@@ -45,6 +45,8 @@ fun ProfileScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToTasbih: () -> Unit,
     onNavigateToHadith: () -> Unit,
+    isCloudSynced: Boolean = true,
+    onExitLocalMode: () -> Unit = {},
     bottomContentPadding: PaddingValues = PaddingValues(0.dp)
 ) {
     val context = LocalContext.current
@@ -185,7 +187,7 @@ fun ProfileScreen(
                                             modifier = Modifier.size(13.dp)
                                         )
                                         Text(
-                                            text = "Tersinkron Cloud",
+                                            text = if (isCloudSynced) "Tersinkron Cloud" else "Mode Lokal (Perangkat)",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = DeepSage,
                                             fontWeight = FontWeight.Bold
@@ -381,10 +383,14 @@ fun ProfileScreen(
                 Button(
                     onClick = {
                         showLogoutDialog = false
-                        isSigningOut = true
-                        scope.launch {
-                            GoogleAuthHelper.signOut(context)
-                            isSigningOut = false
+                        if (isCloudSynced) {
+                            isSigningOut = true
+                            scope.launch {
+                                GoogleAuthHelper.signOut(context)
+                                isSigningOut = false
+                            }
+                        } else {
+                            onExitLocalMode()
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),

@@ -33,7 +33,7 @@ class UserWorshipRepository(context: Context) {
     }
 
     private fun requireUserId(): String =
-        Firebase.auth.currentUser?.uid
+        FirebaseRuntimeGuard.currentUserOrNull(appContext)?.uid
             ?: throw IllegalStateException("Pengguna belum masuk ke akun Google.")
 
     private fun userDocRef(uid: String) = db.collection("users").document(uid)
@@ -216,7 +216,7 @@ class UserWorshipRepository(context: Context) {
                 }
                 docRef.update(updateData).await()
             } else {
-                val user = Firebase.auth.currentUser
+                val user = FirebaseRuntimeGuard.currentUserOrNull(appContext)
                 val safeName = user?.displayName?.trim()?.take(100).takeIf { !it.isNullOrBlank() } ?: "Sahabat Ibadah"
                 val createData = buildMap<String, Any?> {
                     put("userId", uid)

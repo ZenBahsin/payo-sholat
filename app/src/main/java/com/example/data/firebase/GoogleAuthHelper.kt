@@ -54,8 +54,13 @@ object GoogleAuthHelper {
      * Silent auto sign-in for returning users using GetGoogleIdOption (single option in request).
      */
     suspend fun attemptAutoSignIn(activityContext: Context): AuthOutcome {
-        if (Firebase.auth.currentUser != null) {
-            return AuthOutcome.Success(Firebase.auth.currentUser!!)
+        if (!FirebaseRuntimeGuard.isFirebaseInitialized(activityContext)) {
+            Log.w(TAG, "FirebaseApp not initialized; skipping silent sign-in.")
+            return AuthOutcome.Cancelled
+        }
+        val existingUser = FirebaseRuntimeGuard.currentUserOrNull(activityContext)
+        if (existingUser != null) {
+            return AuthOutcome.Success(existingUser)
         }
         return try {
             val webClientId = resolveWebClientId(activityContext)
@@ -77,7 +82,7 @@ object GoogleAuthHelper {
                 context = activityContext,
                 request = request
             )
-            exchangeGoogleCredential(result.credential)
+            exchangeGoogleCredential(activityContext, result.credential)
         } catch (e: CancellationException) {
             throw e
         } catch (e: NoCredentialException) {
@@ -100,6 +105,9 @@ object GoogleAuthHelper {
      * Always uses GetSignInWithGoogleOption as the single option in GetCredentialRequest.
      */
     suspend fun signInWithGoogle(activityContext: Context): AuthOutcome {
+        if (!FirebaseRuntimeGuard.isFirebaseInitialized(activityContext)) {
+            return AuthOutcome.Error("Konfigurasi Firebase (google-services.json) belum terpasang pada build APK ini.")
+        }
         return try {
             val webClientId = resolveWebClientId(activityContext)
             if (webClientId == null) {
@@ -117,7 +125,7 @@ object GoogleAuthHelper {
                 context = activityContext,
                 request = request
             )
-            exchangeGoogleCredential(result.credential)
+            exchangeGoogleCredential(activityContext, result.credential)
         } catch (e: CancellationException) {
             throw e
         } catch (e: GetCredentialCancellationException) {
@@ -132,13 +140,18 @@ object GoogleAuthHelper {
         }
     }
 
-    private suspend fun exchangeGoogleCredential(credential: androidx.credentials.Credential): AuthOutcome {
+    private suspend fun exchangeGoogleCredential(
+        context: Context,
+        credential: androidx.credentials.Credential
+    ): AuthOutcome {
+        val auth = FirebaseRuntimeGuard.authOrNull(context)
+            ?: return AuthOutcome.Error("Firebase Auth belum terinisialisasi.")
         if (credential is CustomCredential &&
             credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
         ) {
             val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
             val firebaseCredential = GoogleAuthProvider.getCredential(googleIdTokenCredential.idToken, null)
-            val authResult = Firebase.auth.signInWithCredential(firebaseCredential).await()
+            val authResult = auth.signInWithCredential(firebaseCredential).await()
             val user = authResult.user
             return if (user != null) {
                 AuthOutcome.Success(user)
@@ -161,7 +174,7 @@ object GoogleAuthHelper {
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clear CredentialManager state during signOut: ${e.message}")
             } finally {
-                Firebase.auth.signOut()
+                FirebaseRuntimeGuard.authOrNull(context)?.signOut()
             }
         }
     }

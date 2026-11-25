@@ -43,6 +43,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.data.firebase.FirebaseRuntimeGuard
 import com.example.data.firebase.GoogleAuthHelper
 import com.example.ui.MainViewModel
 import com.example.ui.MainViewModelFactory
@@ -85,44 +86,84 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun PayoShalatRoot() {
     val context = LocalContext.current
-    var currentUser by remember { mutableStateOf<FirebaseUser?>(Firebase.auth.currentUser) }
-    var isCheckingSession by remember { mutableStateOf(Firebase.auth.currentUser == null) }
+    val isFirebaseReady = remember { FirebaseRuntimeGuard.isFirebaseInitialized(context) }
 
-    // Observe Firebase Auth state reactively across sign-in, sign-out, and account switches
-    DisposableEffect(Unit) {
-        val listener = FirebaseAuth.AuthStateListener { auth ->
-            currentUser = auth.currentUser
-            if (auth.currentUser != null) {
-                isCheckingSession = false
+    var currentUser by remember {
+        mutableStateOf<FirebaseUser?>(FirebaseRuntimeGuard.currentUserOrNull(context))
+    }
+    var isCheckingSession by remember {
+        mutableStateOf(isFirebaseReady && FirebaseRuntimeGuard.currentUserOrNull(context) == null)
+    }
+    var enteredLocalMode by remember { mutableStateOf(false) }
+
+    // Observe Firebase Auth state reactively ONLY when FirebaseApp is initialized
+    DisposableEffect(isFirebaseReady) {
+        val auth = if (isFirebaseReady) FirebaseRuntimeGuard.authOrNull(context) else null
+        if (auth == null) {
+            onDispose { }
+        } else {
+            val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+                currentUser = firebaseAuth.currentUser
+                if (firebaseAuth.currentUser != null) {
+                    isCheckingSession = false
+                }
             }
-        }
-        Firebase.auth.addAuthStateListener(listener)
-        onDispose {
-            Firebase.auth.removeAuthStateListener(listener)
+            auth.addAuthStateListener(listener)
+            onDispose {
+                auth.removeAuthStateListener(listener)
+            }
         }
     }
 
-    // Attempt silent auto sign-in for returning Google users
-    LaunchedEffect(Unit) {
-        if (Firebase.auth.currentUser == null) {
+    // Attempt silent auto sign-in for returning Google users when Firebase is configured
+    LaunchedEffect(isFirebaseReady) {
+        if (isFirebaseReady && FirebaseRuntimeGuard.currentUserOrNull(context) == null) {
             GoogleAuthHelper.attemptAutoSignIn(context)
         }
         isCheckingSession = false
     }
 
     val user = currentUser
-    if (user == null) {
-        AuthScreen(isCheckingSession = isCheckingSession)
-    } else {
-        // Strict key(uid) scope ensures clean disposal of previous user's Firestore listeners on sign-out/switch
-        key(user.uid) {
-            AuthenticatedPayoShalatApp(uid = user.uid)
+    when {
+        isFirebaseReady && user != null -> {
+            // Strict key(uid) scope ensures clean disposal of previous user's Firestore listeners on sign-out/switch
+            key(user.uid) {
+                AuthenticatedPayoShalatApp(
+                    uid = user.uid,
+                    isCloudSynced = true,
+                    onExitLocalMode = {}
+                )
+            }
+        }
+        !isFirebaseReady && enteredLocalMode -> {
+            key(FirebaseRuntimeGuard.LOCAL_FALLBACK_UID) {
+                AuthenticatedPayoShalatApp(
+                    uid = FirebaseRuntimeGuard.LOCAL_FALLBACK_UID,
+                    isCloudSynced = false,
+                    onExitLocalMode = { enteredLocalMode = false }
+                )
+            }
+        }
+        else -> {
+            AuthScreen(
+                isCheckingSession = isCheckingSession,
+                isFirebaseReady = isFirebaseReady,
+                onEnterLocalMode = if (!isFirebaseReady) {
+                    { enteredLocalMode = true }
+                } else {
+                    null
+                }
+            )
         }
     }
 }
 
 @Composable
-private fun AuthenticatedPayoShalatApp(uid: String) {
+private fun AuthenticatedPayoShalatApp(
+    uid: String,
+    isCloudSynced: Boolean,
+    onExitLocalMode: () -> Unit
+) {
     val context = LocalContext.current
     val application = context.applicationContext as Application
     val navController = rememberNavController()
@@ -300,6 +341,8 @@ private fun AuthenticatedPayoShalatApp(uid: String) {
                     onNavigateToSettings = { navController.navigate("settings") },
                     onNavigateToTasbih = { navController.navigate("tasbih") },
                     onNavigateToHadith = { navController.navigate("hadith") },
+                    isCloudSynced = isCloudSynced,
+                    onExitLocalMode = onExitLocalMode,
                     bottomContentPadding = innerPadding
                 )
             }

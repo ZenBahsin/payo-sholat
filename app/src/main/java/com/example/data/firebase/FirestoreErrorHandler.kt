@@ -25,7 +25,7 @@ fun handleFirestoreError(
     operationType: OperationType,
     path: String?
 ): String {
-    val user = Firebase.auth.currentUser
+    val user = runCatching { Firebase.auth.currentUser }.getOrNull()
     val providerArray = JSONArray()
     user?.providerData?.forEach { info ->
         providerArray.put(

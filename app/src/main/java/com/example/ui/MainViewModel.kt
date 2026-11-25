@@ -49,7 +49,15 @@ class MainViewModel(
     private val authenticatedUid: String?
 ) : AndroidViewModel(application) {
 
-    constructor(application: Application) : this(application, Firebase.auth.currentUser?.uid)
+    constructor(application: Application) : this(
+        application,
+        FirebaseRuntimeGuard.currentUserOrNull(application)?.uid
+    )
+
+    private val isCloudSyncEnabled: Boolean =
+        FirebaseRuntimeGuard.isFirebaseInitialized(application) &&
+            !authenticatedUid.isNullOrBlank() &&
+            authenticatedUid != FirebaseRuntimeGuard.LOCAL_FALLBACK_UID
 
     data class FetchQuery(
         val location: LocationPreset,
@@ -195,15 +203,16 @@ class MainViewModel(
 
     val userDisplayName: StateFlow<String> = _userProfile
         .map { profile ->
+            val fbUser = FirebaseRuntimeGuard.currentUserOrNull(getApplication())
             profile?.fullName?.takeIf { it.isNotBlank() }
-                ?: Firebase.auth.currentUser?.displayName?.takeIf { it.isNotBlank() }
-                ?: Firebase.auth.currentUser?.email?.substringBefore("@")
+                ?: fbUser?.displayName?.takeIf { it.isNotBlank() }
+                ?: fbUser?.email?.substringBefore("@")
                 ?: "Sahabat Ibadah"
         }
         .stateIn(
             viewModelScope,
             SharingStarted.Eagerly,
-            Firebase.auth.currentUser?.displayName?.takeIf { it.isNotBlank() } ?: "Sahabat Ibadah"
+            FirebaseRuntimeGuard.currentUserOrNull(application)?.displayName?.takeIf { it.isNotBlank() } ?: "Sahabat Ibadah"
         )
 
     val userFirstName: StateFlow<String> = userDisplayName
@@ -211,16 +220,59 @@ class MainViewModel(
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
     val userEmail: StateFlow<String> = _userProfile
-        .map { profile -> profile?.email ?: Firebase.auth.currentUser?.email ?: "" }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, Firebase.auth.currentUser?.email ?: "")
+        .map { profile -> profile?.email ?: FirebaseRuntimeGuard.currentUserOrNull(getApplication())?.email ?: "" }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, FirebaseRuntimeGuard.currentUserOrNull(application)?.email ?: "")
 
     val userAvatarUrl: StateFlow<String?> = _userProfile
-        .map { profile -> profile?.avatarUrl ?: Firebase.auth.currentUser?.photoUrl?.toString() }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, Firebase.auth.currentUser?.photoUrl?.toString())
+        .map { profile -> profile?.avatarUrl ?: FirebaseRuntimeGuard.currentUserOrNull(getApplication())?.photoUrl?.toString() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, FirebaseRuntimeGuard.currentUserOrNull(application)?.photoUrl?.toString())
 
-    // Prayer Logs (Remote Firestore + Optimistic Local Overlay)
-    private val _remotePrayerLogs = MutableStateFlow<List<PrayerLogDoc>>(emptyList())
+    // Prayer Logs (Remote Firestore or Local Prefs Fallback + Optimistic Local Overlay)
+    private val _remotePrayerLogs = MutableStateFlow<List<PrayerLogDoc>>(loadLocalPrayerLogs())
     private val _optimisticPrayerLogs = MutableStateFlow<Map<String, PrayerLogDoc>>(emptyMap())
+
+    private fun loadLocalPrayerLogs(): List<PrayerLogDoc> {
+        val raw = prefs.getString("local_prayer_logs_v1", null) ?: return emptyList()
+        return runCatching {
+            val arr = org.json.JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val date = obj.optString("prayerDate")
+                    val name = obj.optString("prayerName")
+                    if (date.length == 10 && name in WorshipDateUtils.obligatoryPrayers) {
+                        add(
+                            PrayerLogDoc(
+                                id = WorshipDateUtils.prayerLogDocId(date, name),
+                                userId = FirebaseRuntimeGuard.LOCAL_FALLBACK_UID,
+                                prayerDate = date,
+                                prayerName = name,
+                                completed = obj.optBoolean("completed", false),
+                                prayMode = obj.optString("prayMode", "sendiri")
+                            )
+                        )
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveLocalPrayerLogs(logs: List<PrayerLogDoc>) {
+        runCatching {
+            val arr = org.json.JSONArray()
+            logs.takeLast(450).forEach { log ->
+                arr.put(
+                    org.json.JSONObject().apply {
+                        put("prayerDate", log.prayerDate)
+                        put("prayerName", log.prayerName)
+                        put("completed", log.completed)
+                        put("prayMode", log.prayMode)
+                    }
+                )
+            }
+            prefs.edit().putString("local_prayer_logs_v1", arr.toString()).apply()
+        }
+    }
 
     val allPrayerLogs: StateFlow<List<PrayerLogDoc>> = combine(
         _remotePrayerLogs,
@@ -635,9 +687,9 @@ class MainViewModel(
         prefs.registerOnSharedPreferenceChangeListener(prefsChangeListener)
         WidgetLocationSyncHelper.registerWidgetLocationUpdates(application)
 
-        // Start per-user Firestore synchronization when authenticated
-        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid
-        if (uid != null) {
+        // Start per-user Firestore synchronization ONLY when FirebaseApp is initialized & user is authenticated
+        val uid = authenticatedUid ?: FirebaseRuntimeGuard.currentUserOrNull(application)?.uid
+        if (isCloudSyncEnabled && uid != null) {
             startFirestoreSync(uid)
         }
 
@@ -733,7 +785,7 @@ class MainViewModel(
     private fun startFirestoreSync(uid: String) {
         // 1. Ensure user profile doc exists in Firestore
         viewModelScope.launch(Dispatchers.IO) {
-            val currentUser = Firebase.auth.currentUser
+            val currentUser = FirebaseRuntimeGuard.currentUserOrNull(getApplication())
             if (currentUser != null && currentUser.uid == uid) {
                 worshipRepo.ensureUserProfile(currentUser, _currentLocation.value)
             }
@@ -895,7 +947,7 @@ class MainViewModel(
         }
         val newCompleted = !(existing?.completed ?: false)
         val currentMode = existing?.prayMode ?: "sendiri"
-        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+        val uid = authenticatedUid ?: FirebaseRuntimeGuard.currentUserOrNull(getApplication())?.uid ?: ""
 
         val optimisticDoc = PrayerLogDoc(
             id = docId,
@@ -906,8 +958,16 @@ class MainViewModel(
             prayMode = currentMode
         )
 
-        // Instant Optimistic UI update
+        // Instant Optimistic UI update + local persistence fallback
         _optimisticPrayerLogs.update { it + (docId to optimisticDoc) }
+        if (!isCloudSyncEnabled) {
+            val updatedList = allPrayerLogs.value.filterNot {
+                it.prayerDate == dateKey && it.prayerName.equals(normalized, ignoreCase = true)
+            } + optimisticDoc
+            _remotePrayerLogs.value = updatedList
+            saveLocalPrayerLogs(updatedList)
+            return
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
             val result = worshipRepo.upsertPrayerLog(
@@ -933,7 +993,7 @@ class MainViewModel(
         }
         val nextMode = if (existing?.prayMode == "berjamaah_masjid") "sendiri" else "berjamaah_masjid"
         val completed = existing?.completed ?: true
-        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+        val uid = authenticatedUid ?: FirebaseRuntimeGuard.currentUserOrNull(getApplication())?.uid ?: ""
 
         val optimisticDoc = PrayerLogDoc(
             id = docId,
@@ -945,6 +1005,14 @@ class MainViewModel(
         )
 
         _optimisticPrayerLogs.update { it + (docId to optimisticDoc) }
+        if (!isCloudSyncEnabled) {
+            val updatedList = allPrayerLogs.value.filterNot {
+                it.prayerDate == dateKey && it.prayerName.equals(normalized, ignoreCase = true)
+            } + optimisticDoc
+            _remotePrayerLogs.value = updatedList
+            saveLocalPrayerLogs(updatedList)
+            return
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
             val result = worshipRepo.upsertPrayerLog(
@@ -1205,7 +1273,9 @@ class MainViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val finalPreset = WidgetLocationSyncHelper.resolveLocationFromCoordinates(lat, lng)
             PrayerLocationCatalog.saveLocationPreset(getApplication(), finalPreset, isAutoGps = true)
-            worshipRepo.updateUserLocationAndPrefs(finalPreset)
+            if (isCloudSyncEnabled) {
+                worshipRepo.updateUserLocationAndPrefs(finalPreset)
+            }
 
             withContext(Dispatchers.Main) {
                 _useAutoGps.value = true
@@ -1228,8 +1298,10 @@ class MainViewModel(
         refreshCountdown()
         com.example.receiver.PrayerWidgetProvider.updateAllWidgets(getApplication())
 
-        viewModelScope.launch(Dispatchers.IO) {
-            worshipRepo.updateUserLocationAndPrefs(preset)
+        if (isCloudSyncEnabled) {
+            viewModelScope.launch(Dispatchers.IO) {
+                worshipRepo.updateUserLocationAndPrefs(preset)
+            }
         }
     }
 
@@ -1264,6 +1336,7 @@ class MainViewModel(
     }
 
     private fun syncNotificationPrefsToCloud() {
+        if (!isCloudSyncEnabled) return
         viewModelScope.launch(Dispatchers.IO) {
             val prefsMap = buildMap<String, String> {
                 put("azanSound", _azanSound.value)
@@ -1281,6 +1354,7 @@ class MainViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             tasbihRepo.saveTasbih(updated)
         }
+        if (!isCloudSyncEnabled) return
         tasbihSyncJob?.cancel()
         tasbihSyncJob = viewModelScope.launch(Dispatchers.IO) {
             delay(350) // Coalesce rapid taps cleanly before writing to Firestore
@@ -1325,7 +1399,7 @@ class MainViewModel(
     fun saveQuranBookmark(surahId: Int, surahName: String, ayatNumber: Int) {
         val totalAyahs = WorshipDateUtils.computeCumulativeAyahs(surahId, ayatNumber)
         val pct = WorshipDateUtils.computeKhatamPercentage(totalAyahs)
-        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+        val uid = authenticatedUid ?: FirebaseRuntimeGuard.currentUserOrNull(getApplication())?.uid ?: ""
         val existingBookmarks = quranProgress.value?.bookmarks ?: emptyList()
         val entry = "$surahId:$ayatNumber"
         val updatedBookmarks = (listOf(entry) + existingBookmarks.filterNot { it == entry }).take(20)
@@ -1343,21 +1417,23 @@ class MainViewModel(
 
         viewModelScope.launch(Dispatchers.IO) {
             bookmarkRepo.saveBookmark(surahId, surahName, ayatNumber)
-            worshipRepo.saveQuranProgress(
-                surahNumber = surahId,
-                surahName = surahName,
-                ayahNumber = ayatNumber,
-                totalAyahsRead = totalAyahs,
-                khatamPercentage = pct,
-                bookmarks = updatedBookmarks
-            ).onFailure { err ->
-                _cloudSyncError.value = err.localizedMessage ?: "Gagal menyinkronkan progres Al-Qur'an."
+            if (isCloudSyncEnabled) {
+                worshipRepo.saveQuranProgress(
+                    surahNumber = surahId,
+                    surahName = surahName,
+                    ayahNumber = ayatNumber,
+                    totalAyahsRead = totalAyahs,
+                    khatamPercentage = pct,
+                    bookmarks = updatedBookmarks
+                ).onFailure { err ->
+                    _cloudSyncError.value = err.localizedMessage ?: "Gagal menyinkronkan progres Al-Qur'an."
+                }
             }
         }
     }
 
     fun deleteQuranBookmark() {
-        val uid = authenticatedUid ?: Firebase.auth.currentUser?.uid ?: ""
+        val uid = authenticatedUid ?: FirebaseRuntimeGuard.currentUserOrNull(getApplication())?.uid ?: ""
         _optimisticQuranProgress.value = QuranProgressDoc(
             id = "main",
             userId = uid,
@@ -1370,14 +1446,16 @@ class MainViewModel(
         )
         viewModelScope.launch(Dispatchers.IO) {
             bookmarkRepo.deleteBookmark()
-            worshipRepo.saveQuranProgress(
-                surahNumber = 0,
-                surahName = "",
-                ayahNumber = 0,
-                totalAyahsRead = 0,
-                khatamPercentage = 0,
-                bookmarks = emptyList()
-            )
+            if (isCloudSyncEnabled) {
+                worshipRepo.saveQuranProgress(
+                    surahNumber = 0,
+                    surahName = "",
+                    ayahNumber = 0,
+                    totalAyahsRead = 0,
+                    khatamPercentage = 0,
+                    bookmarks = emptyList()
+                )
+            }
         }
     }
 

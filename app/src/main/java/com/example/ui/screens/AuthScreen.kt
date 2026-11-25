@@ -42,7 +42,9 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun AuthScreen(
-    isCheckingSession: Boolean = false
+    isCheckingSession: Boolean = false,
+    isFirebaseReady: Boolean = true,
+    onEnterLocalMode: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -164,7 +166,11 @@ fun AuthScreen(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Text(
-                        text = "Masuk untuk menyimpan riwayat ibadahmu dengan aman di cloud",
+                        text = if (isFirebaseReady) {
+                            "Masuk untuk menyimpan riwayat ibadahmu dengan aman di cloud"
+                        } else {
+                            "Mulai catat ibadah harianmu langsung di perangkat ini"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MutedOliveGray,
                         textAlign = TextAlign.Center
@@ -226,71 +232,94 @@ fun AuthScreen(
                         }
                     }
 
-                    // Primary Deep Sage CTA -> Interactive Google Sign-In via Jetpack Credential Manager
-                    Button(
-                        onClick = {
-                            if (isSigningIn || isCheckingSession) return@Button
-                            isSigningIn = true
-                            errorMessage = null
-                            scope.launch {
-                                when (val outcome = GoogleAuthHelper.signInWithGoogle(context)) {
-                                    is AuthOutcome.Success -> {
-                                        isSigningIn = false
-                                    }
-                                    AuthOutcome.Cancelled -> {
-                                        isSigningIn = false
-                                    }
-                                    is AuthOutcome.Error -> {
-                                        isSigningIn = false
-                                        errorMessage = outcome.message
+                    if (isFirebaseReady) {
+                        // Primary Deep Sage CTA -> Interactive Google Sign-In via Jetpack Credential Manager
+                        Button(
+                            onClick = {
+                                if (isSigningIn || isCheckingSession) return@Button
+                                isSigningIn = true
+                                errorMessage = null
+                                scope.launch {
+                                    when (val outcome = GoogleAuthHelper.signInWithGoogle(context)) {
+                                        is AuthOutcome.Success -> {
+                                            isSigningIn = false
+                                        }
+                                        AuthOutcome.Cancelled -> {
+                                            isSigningIn = false
+                                        }
+                                        is AuthOutcome.Error -> {
+                                            isSigningIn = false
+                                            errorMessage = outcome.message
+                                        }
                                     }
                                 }
-                            }
-                        },
-                        enabled = !isSigningIn && !isCheckingSession,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(54.dp)
-                            .testTag("google_sign_in_button"),
-                        shape = CircleShape,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = DeepSage,
-                            contentColor = PureWhite,
-                            disabledContainerColor = DeepSage.copy(alpha = 0.6f)
-                        ),
-                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
-                    ) {
-                        if (isSigningIn || isCheckingSession) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                color = PureWhite,
-                                strokeWidth = 2.2.dp
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = if (isCheckingSession) "Memeriksa sesi..." else "Menghubungkan akun...",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = PureWhite
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .size(26.dp)
-                                    .clip(CircleShape)
-                                    .background(PureWhite),
-                                contentAlignment = Alignment.Center
-                            ) {
+                            },
+                            enabled = !isSigningIn && !isCheckingSession,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .testTag("google_sign_in_button"),
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = DeepSage,
+                                contentColor = PureWhite,
+                                disabledContainerColor = DeepSage.copy(alpha = 0.6f)
+                            ),
+                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+                        ) {
+                            if (isSigningIn || isCheckingSession) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = PureWhite,
+                                    strokeWidth = 2.2.dp
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
                                 Text(
-                                    text = "G",
-                                    fontFamily = PlusJakartaSansFontFamily,
-                                    fontWeight = FontWeight.ExtraBold,
+                                    text = if (isCheckingSession) "Memeriksa sesi..." else "Menghubungkan akun...",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = PureWhite
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .background(PureWhite),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "G",
+                                        fontFamily = PlusJakartaSansFontFamily,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 15.sp,
+                                        color = DeepSage
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    text = "Lanjutkan dengan Google",
+                                    style = MaterialTheme.typography.labelLarge,
                                     fontSize = 15.sp,
-                                    color = DeepSage
+                                    color = PureWhite
                                 )
                             }
-                            Spacer(modifier = Modifier.width(12.dp))
+                        }
+                    } else if (onEnterLocalMode != null) {
+                        Button(
+                            onClick = onEnterLocalMode,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .testTag("enter_local_mode_button"),
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = DeepSage,
+                                contentColor = PureWhite
+                            ),
+                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+                        ) {
                             Text(
-                                text = "Lanjutkan dengan Google",
+                                text = "Mulai Sekarang (Mode Lokal)",
                                 style = MaterialTheme.typography.labelLarge,
                                 fontSize = 15.sp,
                                 color = PureWhite
@@ -311,9 +340,14 @@ fun AuthScreen(
                             modifier = Modifier.size(15.dp)
                         )
                         Text(
-                            text = "Tersinkronisasi otomatis antar perangkat",
+                            text = if (isFirebaseReady) {
+                                "Tersinkronisasi otomatis antar perangkat"
+                            } else {
+                                "Tambahkan secret GOOGLE_SERVICES_JSON untuk sinkronisasi cloud"
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MutedOliveGray
+                            color = MutedOliveGray,
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
